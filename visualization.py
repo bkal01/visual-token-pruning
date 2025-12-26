@@ -2,7 +2,7 @@ import io
 import matplotlib.pyplot as plt
 import numpy as np
 
-def plot_attn_heatmap(attn_scores):
+def plot_attn_heatmap(attn_scores, save_path=None):
     """
     plots a heatmap of the attention scores, shape (T, T)
     """
@@ -14,10 +14,9 @@ def plot_attn_heatmap(attn_scores):
     plt.imshow(masked_attn_scores, cmap="viridis", aspect="auto")
     plt.colorbar()
     plt.title("Attention Heatmap")
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-    plt.close()
-    buf.seek(0)
-    return buf.read()
+    if save_path:
+        plt.savefig(save_path, format="png", dpi=150, bbox_inches="tight")
+    else:
+        plt.show()
 
 

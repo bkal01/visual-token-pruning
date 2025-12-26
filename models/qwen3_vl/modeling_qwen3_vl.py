@@ -8,11 +8,12 @@ class PrunedQwen3VL(Qwen3VLForConditionalGeneration):
 
     def register_hooks(self):
         """
-        hook into Qwen3VLTextAttention and capture the attention weights
+        hook into Qwen3VLTextAttention and capture the attention weights during prefill
         """
         def hook(module, input, output):
             attn_output, attn_weights = output
-            self.captured_attentions.append(attn_weights)
+            if attn_weights.shape[2] > 1:
+                self.captured_attentions.append(attn_weights.cpu())
             return output
 
         for idx, layer in enumerate(self.model.language_model.layers):
