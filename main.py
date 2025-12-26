@@ -3,7 +3,7 @@ import modal
 
 from uuid import uuid4
 
-from visualization import plot_attn_heatmap
+from visualization import plot_attn_heatmap, plot_last_attn_intensity_distribution
 
 app = modal.App(name="visual-token-pruning")
 
@@ -70,7 +70,7 @@ def run_vlm():
 def main():
     id = str(uuid4())
     print(f"Run UUID: {id}")
-    os.makedirs(f"assets/{id}/", exist_ok=True)
+    os.makedirs(f"assets/runs/{id}/", exist_ok=True)
 
 
     output_text,prefill_attn_scores = run_vlm.remote()
@@ -81,7 +81,11 @@ def main():
     
     # average across heads
     layer_1_scores, layer_14_scores, layer_28_scores = layer_1_scores.mean(dim=1).squeeze(dim=0), layer_14_scores.mean(dim=1).squeeze(dim=0), layer_28_scores.mean(dim=1).squeeze(dim=0)
-    plot_attn_heatmap(layer_1_scores, save_path=f"assets/{id}/layer_1_attention_heatmap.png")
-    plot_attn_heatmap(layer_14_scores, save_path=f"assets/{id}/layer_14_attention_heatmap.png")
-    plot_attn_heatmap(layer_28_scores, save_path=f"assets/{id}/layer_28_attention_heatmap.png")
+    plot_attn_heatmap(layer_1_scores, save_path=f"assets/runs/{id}/layer_1_attention_heatmap.png")
+    plot_attn_heatmap(layer_14_scores, save_path=f"assets/runs/{id}/layer_14_attention_heatmap.png")
+    plot_attn_heatmap(layer_28_scores, save_path=f"assets/runs/{id}/layer_28_attention_heatmap.png")
+
+    plot_last_attn_intensity_distribution(layer_1_scores, save_path=f"assets/runs/{id}/layer_1_last_attention_distribution.png")
+    plot_last_attn_intensity_distribution(layer_14_scores, save_path=f"assets/runs/{id}/layer_14_last_attention_distribution.png")
+    plot_last_attn_intensity_distribution(layer_28_scores, save_path=f"assets/runs/{id}/layer_28_last_attention_distribution.png")
     
