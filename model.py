@@ -50,4 +50,10 @@ def run_inference(
         **inputs,
         max_new_tokens=max_new_tokens,
     )
-    return inputs["input_ids"], generated_ids, model.captured_attentions
+
+    # mark which tokens are visual tokens
+    input_ids = inputs["input_ids"][0]
+    token_types = torch.zeros_like(input_ids)
+    token_types[input_ids == model.config.image_token_id] = 1
+
+    return inputs["input_ids"], token_types, generated_ids, model.captured_attentions

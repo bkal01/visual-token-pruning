@@ -3,7 +3,11 @@ import modal
 
 from uuid import uuid4
 
-from visualization import plot_attn_heatmap, plot_last_attn_intensity_distribution
+from visualization import (
+    plot_attn_heatmap,
+    plot_last_attn_intensity_distribution,
+    plot_attn_visual_tokens_distribution,
+)
 
 app = modal.App(name="visual-token-pruning")
 
@@ -50,7 +54,7 @@ def run_vlm():
 
     print(f"Image: {sample['image']}")
     print(f"Question: {sample['question']}")
-    input_ids, generated_ids, prefill_attn_scores = run_inference(
+    input_ids, token_types, generated_ids, prefill_attn_scores = run_inference(
         model,
         processor,
         sample["image"],
@@ -63,7 +67,7 @@ def run_vlm():
     output_text = processor.batch_decode(
         generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
     )
-    return output_text, prefill_attn_scores
+    return output_text, prefill_attn_scores, token_types.cpu()
 
 
 @app.local_entrypoint()
@@ -73,7 +77,7 @@ def main():
     os.makedirs(f"assets/runs/{id}/", exist_ok=True)
 
 
-    output_text,prefill_attn_scores = run_vlm.remote()
+    output_text, prefill_attn_scores, token_types = run_vlm.remote()
     print(f"Model Output: {output_text}")
 
 
@@ -88,4 +92,8 @@ def main():
     plot_last_attn_intensity_distribution(layer_1_scores, save_path=f"assets/runs/{id}/layer_1_last_attention_distribution.png")
     plot_last_attn_intensity_distribution(layer_14_scores, save_path=f"assets/runs/{id}/layer_14_last_attention_distribution.png")
     plot_last_attn_intensity_distribution(layer_28_scores, save_path=f"assets/runs/{id}/layer_28_last_attention_distribution.png")
+    
+    plot_attn_visual_tokens_distribution(layer_1_scores, token_types, save_path=f"assets/runs/{id}/layer_1_attn_visual_tokens_distribution.png")
+    plot_attn_visual_tokens_distribution(layer_14_scores, token_types, save_path=f"assets/runs/{id}/layer_14_attn_visual_tokens_distribution.png")
+    plot_attn_visual_tokens_distribution(layer_28_scores, token_types, save_path=f"assets/runs/{id}/layer_28_attn_visual_tokens_distribution.png")
     
