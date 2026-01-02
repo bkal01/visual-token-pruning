@@ -73,7 +73,7 @@ def run_inference(
     token_types = torch.zeros_like(input_ids, device=device)
     token_types[input_ids == model.config.image_token_id] = 1
 
-    model.inference_context.token_types.append(token_types.cpu())
+    model.language_model.inference_context.token_types.append(token_types.cpu())
 
     generated_ids = model.generate(
         **inputs,
@@ -83,7 +83,7 @@ def run_inference(
     return VLMInferenceResult(
         input_ids=input_ids,
         generated_ids=generated_ids,
-        inference_context=model.inference_context,
+        inference_context=model.language_model.inference_context,
     )
 
 
@@ -129,12 +129,12 @@ def run_prefill(
     input_ids = inputs["input_ids"][0]
     token_types = torch.zeros_like(input_ids, device=device)
     token_types[input_ids == model.config.image_token_id] = 1
-    model.inference_context.token_types.append(token_types.cpu())
+    model.language_model.inference_context.token_types.append(token_types.cpu())
 
     with torch.inference_mode():
         model.forward(**inputs)
 
     return VLMInferenceResult(
         input_ids=input_ids,
-        inference_context=model.inference_context,
+        inference_context=model.language_model.inference_context,
     )

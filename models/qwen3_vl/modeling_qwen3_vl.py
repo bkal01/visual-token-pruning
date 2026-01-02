@@ -1,10 +1,22 @@
+"""
+This file is a modified version of the `modeling_qwen3_vl.py` file from the Hugging Face transfomers library.
+See https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_vl/modeling_qwen3_vl.py for the original code.
+Changes to forward passes are marked with [PRUNING MODIFICATION].
+"""
 import torch
 
 from dataclasses import dataclass
+from typing import List, Optional, Union
+
 from transformers import Qwen3VLForConditionalGeneration
-from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel, Qwen3VLTextModel,Qwen3VLTextRotaryEmbedding
+from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextDecoderLayer,Qwen3VLTextModel, Qwen3VLTextRotaryEmbedding
 from transformers.modeling_rope_utils import dynamic_rope_update
-from typing import List
+from transformers.cache_utils import Cache, DynamicCache
+from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers.masking_utils import create_causal_mask
+from transformers.processing_utils import Unpack
+from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+from transformers.utils import TransformersKwargs
 
 @dataclass
 class InferenceContext:
@@ -20,61 +32,175 @@ class InferenceContext:
 
 
 class PrunedQwen3VL(Qwen3VLForConditionalGeneration):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.model = PrunedQwen3VLModel(self.config)
+    def __init__(self, config):
+        super().__init__(config)
+        old_lm = self.model.language_model
+        self.model.language_model = PrunedQwen3VLTextModel(config.text_config)
+        self.model.language_model.load_state_dict(old_lm.state_dict())
 
+    def set_pruner(self, pruner):
+        self.model.language_model.pruner = pruner
 
-class PrunedQwen3VLModel(Qwen3VLModel):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.language_model = PrunedQwen3VLTextModel(self.config)
-        
 
 class PrunedQwen3VLTextModel(Qwen3VLTextModel):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, config):
+        super().__init__(config)
+        self.pruner = None
         self.inference_context = InferenceContext(
             attentions=[],
             token_types=[],
             kept_indices=[],
         )
-        self.register_hooks()
+        for i, layer in enumerate(self.layers):
+            new_layer = PrunedQwen3VLTextDecoderLayer(config, i)
+            new_layer.load_state_dict(layer.state_dict())
+            self.layers[i] = new_layer
 
-        if kwargs.get("use_standard_rope", False):
-            print("Using standard RoPE for Qwen3-VL")
-            self.rotary_emb = Qwen3VLTextStandardRotaryEmbedding(self.config)
+    # copied from https://github.com/huggingface/transformers/blob/a7f29523361b2cc12e51c1f5133d95f122f6f45c/src/transformers/models/qwen3_vl/modeling_qwen3_vl.py#L826
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        # args for deepstack
+        visual_pos_masks: Optional[torch.Tensor] = None,
+        deepstack_visual_embeds: Optional[list[torch.Tensor]] = None,
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Union[tuple, BaseModelOutputWithPast]:
+        r"""
+        visual_pos_masks (`torch.Tensor` of shape `(batch_size, seqlen)`, *optional*):
+            The mask of the visual positions.
+        deepstack_visual_embeds (`list[torch.Tensor]`, *optional*):
+            The deepstack visual embeddings. The shape is (num_layers, visual_seqlen, embed_dim).
+            The feature is extracted from the different visual encoder layers, and fed to the decoder
+            hidden states. It's from the paper DeepStack(https://arxiv.org/abs/2406.04334).
+        """
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+        # torch.jit.trace() doesn't support cache objects in the output
+        if use_cache and past_key_values is None and not torch.jit.is_tracing():
+            past_key_values = DynamicCache(config=self.config)
+
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
+
+        if cache_position is None:
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            cache_position = torch.arange(
+                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            )
+
+        # the hard coded `3` is for temporal, height and width.
+        if position_ids is None:
+            position_ids = cache_position.view(1, 1, -1).expand(3, inputs_embeds.shape[0], -1)
+        elif position_ids.ndim == 2:
+            position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+
+        if position_ids.ndim == 3 and position_ids.shape[0] == 4:
+            text_position_ids = position_ids[0]
+            position_ids = position_ids[1:]
         else:
-            print("Using Interleaved MRoPE for Qwen3-VL")
+            text_position_ids = position_ids[0]
 
-    def register_hooks(self):
-        def text_decoder_layer_forward_hook(module, input, output):
-            if self.pruner is not None:
-                layer_idx = module.self_attn.layer_idx
-                output, token_types, kept_indices = self.pruner.prune(
-                    layer_idx=layer_idx,
-                    hidden_states=output,
-                    attention_scores=self.inference_context.attentions[layer_idx],
-                    token_types=self.inference_context.token_types[layer_idx],
+        attention_mask = create_causal_mask(
+            config=self.config,
+            input_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            cache_position=cache_position,
+            past_key_values=past_key_values,
+            position_ids=text_position_ids,
+        )
+
+        hidden_states = inputs_embeds
+
+        # create position embeddings to be shared across the decoder layers
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+        # decoder layers
+        for layer_idx, decoder_layer in enumerate(self.layers):
+            layer_outputs, layer_attn_weights = decoder_layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=text_position_ids,
+                past_key_values=past_key_values,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+                **kwargs,
+            )
+            # [PRUNING MODIFICATION] average attention weights over heads.
+            self.inference_context.attentions.append(layer_attn_weights.mean(dim=1).cpu())
+            hidden_states = layer_outputs
+
+            # add visual features to the hidden states of first several layers
+            if deepstack_visual_embeds is not None and layer_idx in range(len(deepstack_visual_embeds)):
+                hidden_states = self._deepstack_process(
+                    hidden_states,
+                    visual_pos_masks,
+                    deepstack_visual_embeds[layer_idx],
                 )
-                self.inference_context.token_types.append(token_types.cpu())
-                self.inference_context.kept_indices.append(kept_indices.cpu())
-            return output
 
-        def attn_forward_hook(module, input, output):
-            attn_output, attn_weights = output
-            if attn_weights.shape[2] > 1:
-                self.inference_context.attentions.append(attn_weights.mean(dim=1).cpu())
-            return output
+        hidden_states = self.norm(hidden_states)
 
-        for idx, layer in enumerate(self.layers):
-            layer.register_forward_hook(text_decoder_layer_forward_hook)
-            layer.self_attn.register_forward_hook(attn_forward_hook)
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=past_key_values,
+        )
+
+    def _deepstack_process(
+        self, hidden_states: torch.Tensor, visual_pos_masks: torch.Tensor, visual_embeds: torch.Tensor
+    ):
+        visual_pos_masks = visual_pos_masks.to(hidden_states.device)
+        visual_embeds = visual_embeds.to(hidden_states.device, hidden_states.dtype)
+        hidden_states = hidden_states.clone()
+        local_this = hidden_states[visual_pos_masks, :] + visual_embeds
+        hidden_states[visual_pos_masks, :] = local_this
+        return hidden_states
+
+class PrunedQwen3VLTextDecoderLayer(Qwen3VLTextDecoderLayer):
+    def __init__(self, config, layer_idx: int):
+        super().__init__(config, layer_idx)
 
 
-    def forward(self, *args, **kwargs):
-        output = super().forward(*args, **kwargs)
-        return output
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> torch.Tensor:
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        # Self Attention
+        # [PRUNING MODIFICATION] return the attention weights
+        hidden_states, attn_weights = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
+        hidden_states = residual + hidden_states
+
+        # Fully Connected
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+        # [PRUNING MODIFICATION] return the attention weights
+        return hidden_states, attn_weights
+
 
 class Qwen3VLTextStandardRotaryEmbedding(Qwen3VLTextRotaryEmbedding):
     def __init__(self, *args, **kwargs):
