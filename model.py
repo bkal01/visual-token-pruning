@@ -3,16 +3,20 @@ import torch
 from dataclasses import dataclass
 from transformers import AutoProcessor
 
-from models.qwen3_vl.modeling_qwen3_vl import PrunedQwen3VL
+from models.qwen3_vl.modeling_qwen3_vl import InferenceContext, PrunedQwen3VL
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def load_model(model_name):
+def load_model(
+    model_name,
+    pruner=None,
+):
     model = PrunedQwen3VL.from_pretrained(
         model_name,
         dtype=torch.float16,
-        attn_implementation="eager"
+        attn_implementation="eager",
     ).to(device)
+    model.model.language_model.pruner = pruner
 
     processor = AutoProcessor.from_pretrained(model_name)
     return model, processor
@@ -20,9 +24,8 @@ def load_model(model_name):
 @dataclass
 class VLMInferenceResult():
     input_ids: torch.Tensor
-    token_types: torch.Tensor
-    captured_attentions: torch.Tensor
     generated_ids: torch.Tensor = None
+    inference_context: InferenceContext = None
 
 
 def run_inference(
@@ -65,24 +68,22 @@ def run_inference(
     inputs.pop("token_type_ids", None)
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    # reset captured attentions
-    model.captured_attentions = []
+    # mark which tokens are visual tokens
+    input_ids = inputs["input_ids"][0]
+    token_types = torch.zeros_like(input_ids, device=device)
+    token_types[input_ids == model.config.image_token_id] = 1
+
+    model.inference_context.token_types.append(token_types.cpu())
 
     generated_ids = model.generate(
         **inputs,
         max_new_tokens=max_new_tokens,
     )
 
-    # mark which tokens are visual tokens
-    input_ids = inputs["input_ids"][0]
-    token_types = torch.zeros_like(input_ids, device=device)
-    token_types[input_ids == model.config.image_token_id] = 1
-
     return VLMInferenceResult(
         input_ids=input_ids,
-        token_types=token_types,
-        captured_attentions=torch.stack(model.captured_attentions).to(device),
         generated_ids=generated_ids,
+        inference_context=model.inference_context,
     )
 
 
@@ -124,17 +125,16 @@ def run_prefill(
     inputs.pop("token_type_ids", None)
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    model.captured_attentions = []
-    with torch.inference_mode():
-        model.forward(**inputs)
-
-
     # mark which tokens are visual tokens
     input_ids = inputs["input_ids"][0]
     token_types = torch.zeros_like(input_ids, device=device)
     token_types[input_ids == model.config.image_token_id] = 1
+    model.inference_context.token_types.append(token_types.cpu())
+
+    with torch.inference_mode():
+        model.forward(**inputs)
+
     return VLMInferenceResult(
         input_ids=input_ids,
-        token_types=token_types,
-        captured_attentions=torch.stack(model.captured_attentions).to(device),
+        inference_context=model.inference_context,
     )

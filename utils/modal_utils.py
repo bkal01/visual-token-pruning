@@ -26,6 +26,10 @@ def get_modal_image():
             local_path="utils",
             remote_path="/root/utils",
         )
+        .add_local_dir(
+            local_path="pruners",
+            remote_path="/root/pruners",
+        )
         .add_local_file(
             local_path="visualization.py",
             remote_path="/root/visualization.py",

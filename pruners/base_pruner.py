@@ -13,6 +13,7 @@ class Pruner(ABC):
     def prune(
         self,
         layer_idx: int,
+        hidden_states: torch.Tensor,
         attention_scores: torch.Tensor,
         token_types: torch.Tensor,
     ):

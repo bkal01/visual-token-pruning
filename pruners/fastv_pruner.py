@@ -1,6 +1,6 @@
 import torch
 
-from base_pruner import Pruner
+from pruners.base_pruner import Pruner
 
 class FastVPruner(Pruner):
     def __init__(
@@ -30,11 +30,10 @@ class FastVPruner(Pruner):
         attention_scores is a tensor of shape (M, T, T), where M is the number of heads and T is the sequence length.
         token_types is a tensor of shape (T,) with value 0 for text tokens and 1 for visual tokens.
         """
-        if layer_idx < self.layer_threshold:
-            return hidden_states, token_types
         T = len(token_types)
         V = int(token_types.sum())
-
+        if layer_idx < self.layer_threshold:
+            return hidden_states, token_types, torch.arange(T, device=token_types.device)
 
         # we are going to:
         # - average across heads
@@ -52,5 +51,10 @@ class FastVPruner(Pruner):
         topk_relative = visual_token_scores.topk(amount_to_keep).indices.sort().values
 
         keep_mask = ~token_types.bool()
+        print(visual_indices.shape)
+        print(topk_relative.shape)
+        print(topk_relative)
+        print(keep_mask.shape)
         keep_mask[visual_indices[topk_relative]] = True
-        return hidden_states[:, keep_mask, :], token_types[keep_mask]
+        print(hidden_states[:, keep_mask, :].shape)
+        return hidden_states[:, keep_mask, :], token_types[keep_mask], keep_mask.nonzero(as_tuple=True)[0]

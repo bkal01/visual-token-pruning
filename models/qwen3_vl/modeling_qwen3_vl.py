@@ -1,34 +1,80 @@
 import torch
 
+from dataclasses import dataclass
 from transformers import Qwen3VLForConditionalGeneration
-from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextRotaryEmbedding
+from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel, Qwen3VLTextModel,Qwen3VLTextRotaryEmbedding
 from transformers.modeling_rope_utils import dynamic_rope_update
+from typing import List
+
+@dataclass
+class InferenceContext:
+    """
+    Captures layer-by-layer context during inference.
+    attentions: the list of attention scores for each layer. entry i is a tensor of shape (T_i, T_i)
+    token_types: the list of token types (1 for visual, 0 for text) for each layer. entry i is a tensor of shape (T_i,)
+    kept_indices: the list of indices of the tokens that were kept at each layer. entry i is a tensor of shape (T_{i+1},)
+    """
+    attentions: List[torch.Tensor]
+    token_types: List[torch.Tensor]
+    kept_indices: List[torch.Tensor]
+
 
 class PrunedQwen3VL(Qwen3VLForConditionalGeneration):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.captured_attentions = []
+        self.model = PrunedQwen3VLModel(self.config)
+
+
+class PrunedQwen3VLModel(Qwen3VLModel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.language_model = PrunedQwen3VLTextModel(self.config)
+        
+
+class PrunedQwen3VLTextModel(Qwen3VLTextModel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.inference_context = InferenceContext(
+            attentions=[],
+            token_types=[],
+            kept_indices=[],
+        )
         self.register_hooks()
 
         if kwargs.get("use_standard_rope", False):
             print("Using standard RoPE for Qwen3-VL")
-            self.model.language_model.rotary_emb = Qwen3VLTextStandardRotaryEmbedding(self.model.language_model.config)
+            self.rotary_emb = Qwen3VLTextStandardRotaryEmbedding(self.config)
         else:
             print("Using Interleaved MRoPE for Qwen3-VL")
 
     def register_hooks(self):
-        """
-        hook into Qwen3VLTextAttention and capture the attention weights during prefill
-        """
-        def hook(module, input, output):
-            attn_output, attn_weights = output
-            if attn_weights.shape[2] > 1:
-                self.captured_attentions.append(attn_weights.cpu())
+        def text_decoder_layer_forward_hook(module, input, output):
+            if self.pruner is not None:
+                layer_idx = module.self_attn.layer_idx
+                output, token_types, kept_indices = self.pruner.prune(
+                    layer_idx=layer_idx,
+                    hidden_states=output,
+                    attention_scores=self.inference_context.attentions[layer_idx],
+                    token_types=self.inference_context.token_types[layer_idx],
+                )
+                self.inference_context.token_types.append(token_types.cpu())
+                self.inference_context.kept_indices.append(kept_indices.cpu())
             return output
 
-        for idx, layer in enumerate(self.model.language_model.layers):
-            layer.self_attn.register_forward_hook(hook)
+        def attn_forward_hook(module, input, output):
+            attn_output, attn_weights = output
+            if attn_weights.shape[2] > 1:
+                self.inference_context.attentions.append(attn_weights.mean(dim=1).cpu())
+            return output
 
+        for idx, layer in enumerate(self.layers):
+            layer.register_forward_hook(text_decoder_layer_forward_hook)
+            layer.self_attn.register_forward_hook(attn_forward_hook)
+
+
+    def forward(self, *args, **kwargs):
+        output = super().forward(*args, **kwargs)
+        return output
 
 class Qwen3VLTextStandardRotaryEmbedding(Qwen3VLTextRotaryEmbedding):
     def __init__(self, *args, **kwargs):
