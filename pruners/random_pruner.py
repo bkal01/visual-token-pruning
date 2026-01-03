@@ -1,6 +1,6 @@
 import torch
 
-from base_pruner import Pruner
+from pruners.base_pruner import Pruner
 
 class RandomPruner(Pruner):
     def __init__(

@@ -24,11 +24,11 @@ class InferenceContext:
     Captures layer-by-layer context during inference.
     attentions: the list of attention scores for each layer. entry i is a tensor of shape (T_i, T_i)
     token_types: the list of token types (1 for visual, 0 for text) for each layer. entry i is a tensor of shape (T_i,)
-    kept_indices: the list of indices of the tokens that were kept at each layer. entry i is a tensor of shape (T_{i+1},)
+    kept_visual_indices: the list of indices of the visual tokens that were kept at each layer. entry i is a tensor of shape (V_{i+1},)
     """
     attentions: List[torch.Tensor]
     token_types: List[torch.Tensor]
-    kept_indices: List[torch.Tensor]
+    kept_visual_indices: List[torch.Tensor]
 
 
 class PrunedQwen3VL(Qwen3VLForConditionalGeneration):
@@ -49,7 +49,7 @@ class PrunedQwen3VLTextModel(Qwen3VLTextModel):
         self.inference_context = InferenceContext(
             attentions=[],
             token_types=[],
-            kept_indices=[],
+            kept_visual_indices=[],
         )
         for i, layer in enumerate(self.layers):
             new_layer = PrunedQwen3VLTextDecoderLayer(config, i)
@@ -121,6 +121,12 @@ class PrunedQwen3VLTextModel(Qwen3VLTextModel):
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
+        is_prefill = hidden_states.shape[1] > 1
+
+        # [PRUNING MODIFICATION] maintain a list of the original visual indices that are kept after each layer.
+        if visual_pos_masks is not None:
+            original_visual_indices = torch.arange(len(visual_pos_masks[0]), device=visual_pos_masks.device)
+
         # decoder layers
         for layer_idx, decoder_layer in enumerate(self.layers):
             layer_outputs, layer_attn_weights = decoder_layer(
@@ -132,12 +138,36 @@ class PrunedQwen3VLTextModel(Qwen3VLTextModel):
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
-            # [PRUNING MODIFICATION] average attention weights over heads.
-            self.inference_context.attentions.append(layer_attn_weights.mean(dim=1).cpu())
             hidden_states = layer_outputs
+            
+            # [PRUNING MODIFICATION] pruning.
+            if is_prefill:
+                avg_layer_attn_weights = layer_attn_weights.mean(dim=1).squeeze(0)
+                self.inference_context.attentions.append(avg_layer_attn_weights.cpu())
+
+                if self.pruner is not None:
+                    hidden_states, token_types, keep_mask, kept_visual_indices = self.pruner.prune(
+                        layer_idx=layer_idx,
+                        hidden_states=hidden_states,
+                        attention_scores=avg_layer_attn_weights,
+                        token_types=self.inference_context.token_types[-1].to(hidden_states.device),
+                    )
+                    self.inference_context.token_types.append(token_types.cpu())
+                    self.inference_context.kept_visual_indices.append(kept_visual_indices.cpu())
+
+                    visual_pos_masks = token_types.bool().unsqueeze(0)
+                    original_visual_indices = original_visual_indices[kept_visual_indices]
+
+                    cos, sin = position_embeddings
+                    position_embeddings = (cos[:, keep_mask, :], sin[:, keep_mask, :])
+                    attention_mask = attention_mask[:, :, keep_mask, :][:, :, :, keep_mask]
+                    text_position_ids = text_position_ids[:, keep_mask]
+                    cache_position = cache_position[keep_mask]
 
             # add visual features to the hidden states of first several layers
             if deepstack_visual_embeds is not None and layer_idx in range(len(deepstack_visual_embeds)):
+                if is_prefill and self.pruner is not None:
+                    deepstack_visual_embeds[layer_idx] = deepstack_visual_embeds[layer_idx][original_visual_indices, :]
                 hidden_states = self._deepstack_process(
                     hidden_states,
                     visual_pos_masks,

@@ -16,7 +16,7 @@ def load_model(
         dtype=torch.float16,
         attn_implementation="eager",
     ).to(device)
-    model.model.language_model.pruner = pruner
+    model.set_pruner(pruner)
 
     processor = AutoProcessor.from_pretrained(model_name)
     return model, processor

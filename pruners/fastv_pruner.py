@@ -27,21 +27,19 @@ class FastVPruner(Pruner):
     ):
         """
         Prunes tokens using FastV: at each layer, keep the tokens with the highest average attention score received from all other tokens.
-        attention_scores is a tensor of shape (M, T, T), where M is the number of heads and T is the sequence length.
+        attention_scores is a tensor of shape (T, T), where T is the sequence length.
         token_types is a tensor of shape (T,) with value 0 for text tokens and 1 for visual tokens.
         """
         T = len(token_types)
         V = int(token_types.sum())
         if layer_idx < self.layer_threshold:
-            return hidden_states, token_types, torch.arange(T, device=token_types.device)
+            return hidden_states, token_types, torch.ones(T, dtype=torch.bool, device=token_types.device), torch.arange(V, device=token_types.device)
 
         # we are going to:
-        # - average across heads
         # - ignore how much each token attends to itself (was in the phrasing of the FastV paper, not sure if this is correct).
         # - find indices of topk visual tokens by average attention score received from all other tokens.
         # - build a keep mask that is True for the tokens to keep (text tokens and topk visual tokens) and False otherwise.
         # - index into hidden states with the keep mask.
-        attention_scores = attention_scores.mean(dim=0)
         attention_scores *= (1 - torch.eye(T, device=attention_scores.device))
         visual_token_scores = attention_scores[:, token_types == 1].mean(dim=0)
 
@@ -51,10 +49,5 @@ class FastVPruner(Pruner):
         topk_relative = visual_token_scores.topk(amount_to_keep).indices.sort().values
 
         keep_mask = ~token_types.bool()
-        print(visual_indices.shape)
-        print(topk_relative.shape)
-        print(topk_relative)
-        print(keep_mask.shape)
         keep_mask[visual_indices[topk_relative]] = True
-        print(hidden_states[:, keep_mask, :].shape)
-        return hidden_states[:, keep_mask, :], token_types[keep_mask], keep_mask.nonzero(as_tuple=True)[0]
+        return hidden_states[:, keep_mask, :], token_types[keep_mask], keep_mask, topk_relative
