@@ -30,7 +30,7 @@ class FastVPruner(Pruner):
         attention_scores is a tensor of shape (T, T), where T is the sequence length.
         token_types is a tensor of shape (T,) with value 0 for text tokens and 1 for visual tokens.
         """
-        T = len(token_types)
+        T = attention_scores.shape[0]
         V = int(token_types.sum())
         if layer_idx < self.layer_threshold:
             return hidden_states, token_types, torch.ones(T, dtype=torch.bool, device=token_types.device), torch.arange(V, device=token_types.device)
@@ -50,4 +50,4 @@ class FastVPruner(Pruner):
 
         keep_mask = ~token_types.bool()
         keep_mask[visual_indices[topk_relative]] = True
-        return hidden_states[:, keep_mask, :], token_types[keep_mask], keep_mask, topk_relative
+        return hidden_states[:, keep_mask, :], keep_mask
