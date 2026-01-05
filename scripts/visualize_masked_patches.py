@@ -7,10 +7,11 @@ from utils.modal_utils import get_modal_image
 app = modal.App(name="visualize-masked-patches")
 image = get_modal_image()
 
+LAYERS_TO_SHOW = [5, 10, 15, 20, 25]
+
 
 @app.function(image=image, gpu="A100", timeout=10*60)
 def run():
-    import torch
     from datasets import load_dataset
 
     from model import load_model, run_inference
@@ -25,8 +26,8 @@ def run():
         pruner=pruner,
     )
 
-    dataset = load_dataset("merve/vqav2-small", split="validation", streaming=True)
-    sample = next(iter(dataset))
+    dataset = iter(load_dataset("merve/vqav2-small", split="validation", streaming=True))
+    sample = next(dataset)
 
     result = run_inference(
         model,
@@ -35,14 +36,23 @@ def run():
         sample["question"],
     )
 
-    initial_visual_count = len(result.inference_context.surviving_visual_indices[0])
-    final_surviving = result.inference_context.surviving_visual_indices[-1].numpy()
+    all_surviving = result.inference_context.surviving_visual_indices
+    initial_visual_count = len(all_surviving[0])
+    
+    layer_snapshots = {}
+    for layer_idx in LAYERS_TO_SHOW:
+        if layer_idx < len(all_surviving):
+            layer_snapshots[layer_idx] = all_surviving[layer_idx].numpy()
+    
+    final_layer_idx = len(all_surviving) - 1
+    layer_snapshots[final_layer_idx] = all_surviving[-1].numpy()
 
     return {
         "image": sample["image"],
         "question": sample["question"],
         "initial_visual_count": initial_visual_count,
-        "final_surviving_indices": final_surviving,
+        "layer_snapshots": layer_snapshots,
+        "final_layer_idx": final_layer_idx,
     }
 
 
@@ -68,18 +78,7 @@ def create_masked_image(pil_image, kept_mask, grid_h, grid_w):
     return masked_img.astype(np.uint8)
 
 
-@app.local_entrypoint()
-def main():
-    data = run.remote()
-    
-    pil_image = data["image"]
-    question = data["question"]
-    initial_visual_count = data["initial_visual_count"]
-    final_surviving = data["final_surviving_indices"]
-    
-    kept_mask = np.zeros(initial_visual_count, dtype=bool)
-    kept_mask[final_surviving] = True
-    
+def compute_grid_dims(initial_visual_count):
     grid_size = int(np.sqrt(initial_visual_count))
     if grid_size * grid_size != initial_visual_count:
         for gh in range(1, initial_visual_count + 1):
@@ -87,27 +86,53 @@ def main():
                 gw = initial_visual_count // gh
                 if abs(gh - gw) < abs(grid_size - initial_visual_count // grid_size):
                     grid_size = gh
-        grid_h, grid_w = grid_size, initial_visual_count // grid_size
-    else:
-        grid_h = grid_w = grid_size
+        return grid_size, initial_visual_count // grid_size
+    return grid_size, grid_size
+
+
+@app.local_entrypoint()
+def main():
+    data = run.remote()
     
+    pil_image = data["image"]
+    question = data["question"]
+    initial_visual_count = data["initial_visual_count"]
+    layer_snapshots = data["layer_snapshots"]
+    final_layer_idx = data["final_layer_idx"]
+    
+    grid_h, grid_w = compute_grid_dims(initial_visual_count)
     print(f"Visual tokens: {initial_visual_count}, Grid: {grid_h}x{grid_w}")
-    print(f"Kept tokens: {len(final_surviving)}, Pruned: {initial_visual_count - len(final_surviving)}")
     
-    masked_img = create_masked_image(pil_image, kept_mask, grid_h, grid_w)
+    sorted_layers = sorted(layer_snapshots.keys())
+    n_panels = 1 + len(sorted_layers)  # original + each layer snapshot
     
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+    fig, axes = plt.subplots(1, n_panels, figsize=(4 * n_panels, 5))
     
     axes[0].imshow(pil_image)
-    axes[0].set_title("Original Image")
-    axes[0].set_xlabel(question, fontsize=10, wrap=True)
+    axes[0].set_title("Original")
+    axes[0].set_xlabel(question, fontsize=8, wrap=True)
     axes[0].set_xticks([])
     axes[0].set_yticks([])
     
-    axes[1].imshow(masked_img)
-    axes[1].set_title(f"After Pruning ({kept_mask.sum()}/{initial_visual_count} tokens kept)")
-    axes[1].set_xticks([])
-    axes[1].set_yticks([])
+    for i, layer_idx in enumerate(sorted_layers):
+        surviving = layer_snapshots[layer_idx]
+        kept_mask = np.zeros(initial_visual_count, dtype=bool)
+        kept_mask[surviving] = True
+        
+        masked_img = create_masked_image(pil_image, kept_mask, grid_h, grid_w)
+        
+        ax = axes[i + 1]
+        ax.imshow(masked_img)
+        
+        if layer_idx == final_layer_idx:
+            title = f"Final (L{layer_idx})"
+        else:
+            title = f"Layer {layer_idx}"
+        ax.set_title(f"{title}\n{kept_mask.sum()}/{initial_visual_count} kept")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        
+        print(f"Layer {layer_idx}: {kept_mask.sum()}/{initial_visual_count} tokens kept")
     
     plt.tight_layout()
     plt.savefig("masked_patches_visualization.png", dpi=150, bbox_inches="tight")
