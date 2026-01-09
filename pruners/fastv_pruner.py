@@ -5,16 +5,14 @@ from pruners.base_pruner import Pruner
 class FastVPruner(Pruner):
     def __init__(
         self,
-        layer_threshold,
+        target_layers,
         filtering_ratio,
     ):
         """
-        layer_threshold: if the layer # is less than this, no pruning is done
         filtering_ratio: float between 0 and 1, the fraction of tokens to remove at each layer
         """
-        super().__init__()
+        super().__init__(target_layers)
 
-        self.layer_threshold = layer_threshold
         self.filtering_ratio = filtering_ratio
 
 
@@ -26,15 +24,14 @@ class FastVPruner(Pruner):
         token_types,
     ):
         """
-        Prunes tokens using FastV: at each layer, keep the tokens with the highest average attention score received from all other tokens.
+        Prunes tokens using FastV: at a given layer, keep the tokens with the highest average attention score received from all other tokens.
         attention_scores is a tensor of shape (T, T), where T is the sequence length.
         token_types is a tensor of shape (T,) with value 0 for text tokens and 1 for visual tokens.
         """
         T = attention_scores.shape[0]
         V = int(token_types.sum())
-        if layer_idx < self.layer_threshold:
-            return hidden_states, token_types, torch.ones(T, dtype=torch.bool, device=token_types.device), torch.arange(V, device=token_types.device)
-
+        if layer_idx not in self.target_layers:
+            return hidden_states,  torch.ones(T, dtype=torch.bool, device=token_types.device)
         # we are going to:
         # - ignore how much each token attends to itself (was in the phrasing of the FastV paper, not sure if this is correct).
         # - find indices of topk visual tokens by average attention score received from all other tokens.

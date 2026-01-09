@@ -10,8 +10,6 @@ from utils.modal_utils import get_modal_image
 app = modal.App(name="visualize-masked-patches")
 image = get_modal_image()
 
-LAYERS_TO_SHOW = [5, 10, 15, 20, 25]
-
 
 @app.function(image=image, gpu="A100", timeout=10*60)
 def run():
@@ -21,15 +19,15 @@ def run():
     from pruners.fastv_pruner import FastVPruner
 
     pruner = FastVPruner(
-        layer_threshold=0,
-        filtering_ratio=0.1,
+        target_layers=[1], # FastV paper prunes after layer 2's forward pass.
+        filtering_ratio=0.5,
     )
     model, processor = load_model(
         model_name="Qwen/Qwen3-VL-2B-Instruct",
         pruner=pruner,
     )
 
-    dataset = iter(load_dataset("merve/vqav2-small", split="validation", streaming=True))
+    dataset = iter(load_dataset("DatologyAI/DatBench", "math", split="test", streaming=True))
     sample = next(dataset)
 
     result = run_inference(
@@ -44,7 +42,7 @@ def run():
     spatial_merge_size = model.model.visual.config.spatial_merge_size
     patch_size = model.model.visual.config.patch_size
 
-    return sample, inference_context.surviving_visual_indices, result.image_grid_thw.cpu(), spatial_merge_size, patch_size
+    return sample, inference_context.surviving_visual_indices, result.image_grid_thw.cpu(), spatial_merge_size, patch_size, pruner.target_layers
 
 
 
@@ -54,15 +52,22 @@ def main():
     id = str(uuid4())
     print(f"Run UUID: {id}")
     os.makedirs(f"assets/visualize_masked_patches/{id}/", exist_ok=True)
-    sample, surviving_visual_indices, image_grid_thw, spatial_merge_size, patch_size = run.remote()
+    sample, surviving_visual_indices, image_grid_thw, spatial_merge_size, patch_size, target_layers = run.remote()
+
+    print(f"QUESTION: {sample['question']}")
 
     H_tok, W_tok = image_grid_thw[1] // spatial_merge_size, image_grid_thw[2] // spatial_merge_size
 
     image_np = np.array(sample["image"])
+    plt.imshow(image_np.astype(np.uint8))
+    plt.axis("off")
+    plt.savefig(f"assets/visualize_masked_patches/{id}/original.png")
+    plt.close()
 
-    for layer_idx in LAYERS_TO_SHOW:
+
+    for layer_idx in target_layers:
         copy_image_np = image_np.copy() * 0.1
-        for visual_token_index in surviving_visual_indices[layer_idx]:
+        for visual_token_index in surviving_visual_indices[layer_idx + 1]:
             row, col = visual_token_index // W_tok, visual_token_index % W_tok
             pixel_start_row = row * spatial_merge_size * patch_size
             pixel_start_col = col * spatial_merge_size * patch_size
@@ -73,6 +78,6 @@ def main():
                           pixel_start_col:pixel_start_col + spatial_merge_size * patch_size]
 
         plt.imshow(copy_image_np.astype(np.uint8))
-        plt.xlabel(sample["question"])
-        plt.savefig(f"assets/visualize_masked_patches/{id}/layer_{layer_idx}.png")
+        plt.axis("off")
+        plt.savefig(f"assets/visualize_masked_patches/{id}/layer_{layer_idx + 1}.png")
         plt.close()
