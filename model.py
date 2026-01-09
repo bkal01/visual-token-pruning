@@ -24,6 +24,7 @@ def load_model(
 @dataclass
 class VLMInferenceResult():
     input_ids: torch.Tensor
+    image_grid_thw: torch.Tensor
     generated_ids: torch.Tensor = None
     inference_context: InferenceContext = None
 
@@ -76,6 +77,7 @@ def run_inference(
 
     return VLMInferenceResult(
         input_ids=input_ids,
+        image_grid_thw=inputs["image_grid_thw"][0],
         generated_ids=generated_ids,
         inference_context=model.language_model.inference_context,
     )

@@ -39,6 +39,9 @@ class PrunedQwen3VL(Qwen3VLForConditionalGeneration):
     def set_pruner(self, pruner):
         self.model.language_model.pruner = pruner
 
+    def get_inference_context(self):
+        return self.model.language_model.inference_context
+
 
 class PrunedQwen3VLTextModel(Qwen3VLTextModel):
     def __init__(self, config):
