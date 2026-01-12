@@ -17,14 +17,27 @@ def run():
 
     from model import load_model, run_inference
     from pruners.fastv_pruner import FastVPruner
+    from pruners.feather import FeatherPruner
+    from pruners.uniform_pruner import UniformPruner
 
-    pruner = FastVPruner(
-        target_layers=[1], # FastV paper prunes after layer 2's forward pass.
-        filtering_ratio=0.5,
+    # pruner = FastVPruner(
+    #     target_layers=[1], # FastV paper prunes after layer 2's forward pass.
+    #     filtering_ratio=0.5,
+    # )
+    # pruner = FeatherPruner(
+    #     target_layers=[8,16,],
+    #     uniform_target_layers=[8,],
+    #     filtering_ratio=0.75,
+    #     stride=3,
+    # )
+    pruner = UniformPruner(
+        target_layers=[3],
+        stride=3,
     )
     model, processor = load_model(
         model_name="Qwen/Qwen3-VL-2B-Instruct",
         pruner=pruner,
+        rope_config=None,
     )
 
     dataset = iter(load_dataset("DatologyAI/DatBench", "math", split="test", streaming=True))
@@ -65,19 +78,27 @@ def main():
     plt.close()
 
 
+    token_size = spatial_merge_size * patch_size
+
     for layer_idx in target_layers:
         copy_image_np = image_np.copy() * 0.1
         for visual_token_index in surviving_visual_indices[layer_idx + 1]:
             row, col = visual_token_index // W_tok, visual_token_index % W_tok
-            pixel_start_row = row * spatial_merge_size * patch_size
-            pixel_start_col = col * spatial_merge_size * patch_size
+            pixel_start_row = row * token_size
+            pixel_start_col = col * token_size
 
-            copy_image_np[pixel_start_row:pixel_start_row + spatial_merge_size * patch_size,
-                          pixel_start_col:pixel_start_col + spatial_merge_size * patch_size] = \
-                image_np[pixel_start_row:pixel_start_row + spatial_merge_size * patch_size,
-                          pixel_start_col:pixel_start_col + spatial_merge_size * patch_size]
+            copy_image_np[pixel_start_row:pixel_start_row + token_size,
+                          pixel_start_col:pixel_start_col + token_size] = \
+                image_np[pixel_start_row:pixel_start_row + token_size,
+                          pixel_start_col:pixel_start_col + token_size]
 
-        plt.imshow(copy_image_np.astype(np.uint8))
-        plt.axis("off")
-        plt.savefig(f"assets/visualize_masked_patches/{id}/layer_{layer_idx + 1}.png")
+        fig, ax = plt.subplots()
+        ax.imshow(copy_image_np.astype(np.uint8))
+        ax.set_xticks(np.arange(0, image_np.shape[1], token_size))
+        ax.set_yticks(np.arange(0, image_np.shape[0], token_size))
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+        ax.grid(color="gray", alpha=0.3, linewidth=0.5)
+        ax.tick_params(length=0)
+        plt.savefig(f"assets/visualize_masked_patches/{id}/layer_{layer_idx + 1}.png", bbox_inches='tight', pad_inches=0)
         plt.close()

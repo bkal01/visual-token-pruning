@@ -10,6 +10,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def load_model(
     model_name,
     pruner=None,
+    rope_config=None,
 ):
     model = PrunedQwen3VL.from_pretrained(
         model_name,
@@ -17,6 +18,7 @@ def load_model(
         attn_implementation="eager",
     ).to(device)
     model.set_pruner(pruner)
+    model.set_rope_config(rope_config)
 
     processor = AutoProcessor.from_pretrained(model_name)
     return model, processor

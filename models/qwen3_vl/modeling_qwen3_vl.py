@@ -18,6 +18,8 @@ from transformers.processing_utils import Unpack
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.utils import TransformersKwargs
 
+from models.rope_config import RoPEConfig
+
 @dataclass
 class InferenceContext:
     """
@@ -38,6 +40,9 @@ class PrunedQwen3VL(Qwen3VLForConditionalGeneration):
 
     def set_pruner(self, pruner):
         self.model.language_model.pruner = pruner
+
+    def set_rope_config(self, rope_config):
+        self.model.language_model.rope_config = rope_config
 
     def get_inference_context(self):
         return self.model.language_model.inference_context
@@ -119,7 +124,16 @@ class PrunedQwen3VLTextModel(Qwen3VLTextModel):
         hidden_states = inputs_embeds
 
         # create position embeddings to be shared across the decoder layers
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        # [PRUNING MODIFICATION] apply RoPE config.
+        if self.rope_config == RoPEConfig.NONE:
+            batch_size, seq_len, _ = hidden_states.shape
+            head_dim = getattr(self.config, "head_dim", self.config.hidden_size // self.config.num_attention_heads)
+            position_embeddings = (
+                torch.zeros(batch_size, seq_len, head_dim, device=hidden_states.device, dtype=hidden_states.dtype),
+                torch.zeros(batch_size, seq_len, head_dim, device=hidden_states.device, dtype=hidden_states.dtype),
+            )
+        else:
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         is_prefill = hidden_states.shape[1] > 1
         if is_prefill and visual_pos_masks is not None:
