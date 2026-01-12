@@ -23,12 +23,17 @@ from models.rope_config import RoPEConfig
 @dataclass
 class InferenceContext:
     """
-    Captures layer-by-layer context during inference.
+    Captures context during inference that's useful for pruning.
+    Allows us to pass information between the vision model and the text model.
     attentions: the list of attention scores for each layer. entry i is a tensor of shape (T_i, T_i)
     surviving_visual_indices: the list of indices of the visual tokens that were kept at each layer. entry i is a tensor of shape (V_{i+1},)
+    image_grid_thw: the T,H,W dimensions of the input image.
+    spatial_merge_size: how many patches get combined into a token via the VLM adapter.
     """
     attentions: List[torch.Tensor]
     surviving_visual_indices: List[torch.Tensor]
+    image_grid_thw: torch.Tensor
+    spatial_merge_size: int
 
 
 class PrunedQwen3VL(Qwen3VLForConditionalGeneration):
@@ -38,11 +43,16 @@ class PrunedQwen3VL(Qwen3VLForConditionalGeneration):
         self.model.language_model = PrunedQwen3VLTextModel(config.text_config)
         self.model.language_model.load_state_dict(old_lm.state_dict())
 
+        self.model.language_model.inference_context.spatial_merge_size = config.vision_config.spatial_merge_size
+
     def set_pruner(self, pruner):
         self.model.language_model.pruner = pruner
 
     def set_rope_config(self, rope_config):
         self.model.language_model.rope_config = rope_config
+
+    def set_image_grid_thw(self, image_grid_thw):
+        self.model.language_model.inference_context.image_grid_thw = image_grid_thw
 
     def get_inference_context(self):
         return self.model.language_model.inference_context
@@ -55,6 +65,8 @@ class PrunedQwen3VLTextModel(Qwen3VLTextModel):
         self.inference_context = InferenceContext(
             attentions=[],
             surviving_visual_indices=[],
+            image_grid_thw=None,
+            spatial_merge_size=0,
         )
         for i, layer in enumerate(self.layers):
             new_layer = PrunedQwen3VLTextDecoderLayer(config, i)
@@ -164,6 +176,8 @@ class PrunedQwen3VLTextModel(Qwen3VLTextModel):
                         hidden_states=hidden_states,
                         attention_scores=avg_layer_attn_weights,
                         token_types=visual_pos_masks[0],
+                        image_grid_thw=self.inference_context.image_grid_thw,
+                        spatial_merge_size=self.inference_context.spatial_merge_size,
                     )
                     visual_keep_mask = keep_mask[visual_pos_masks[0]]
                     surviving_visual_indices = surviving_visual_indices[visual_keep_mask]

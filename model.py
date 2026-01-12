@@ -72,6 +72,10 @@ def run_inference(
     inputs = {k: v.to(device) for k, v in inputs.items()}
     input_ids = inputs["input_ids"][0]
 
+    # we need access to the image dimensions in the pruner.
+    image_grid_thw = inputs["image_grid_thw"][0]
+    model.set_image_grid_thw(image_grid_thw)
+
     generated_ids = model.generate(
         **inputs,
         max_new_tokens=max_new_tokens,
@@ -79,7 +83,7 @@ def run_inference(
 
     return VLMInferenceResult(
         input_ids=input_ids,
-        image_grid_thw=inputs["image_grid_thw"][0],
+        image_grid_thw=image_grid_thw,
         generated_ids=generated_ids,
         inference_context=model.language_model.inference_context,
     )

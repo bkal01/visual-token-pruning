@@ -16,24 +16,24 @@ def run():
     from datasets import load_dataset
 
     from model import load_model, run_inference
-    from pruners.fastv_pruner import FastVPruner
+    from pruners.fastv import FastVPruner
     from pruners.feather import FeatherPruner
-    from pruners.uniform_pruner import UniformPruner
+    from pruners.uniform import UniformPruner
 
     # pruner = FastVPruner(
     #     target_layers=[1], # FastV paper prunes after layer 2's forward pass.
     #     filtering_ratio=0.5,
     # )
-    # pruner = FeatherPruner(
-    #     target_layers=[8,16,],
-    #     uniform_target_layers=[8,],
-    #     filtering_ratio=0.75,
-    #     stride=3,
-    # )
-    pruner = UniformPruner(
-        target_layers=[3],
+    pruner = FeatherPruner(
+        target_layers=[8,16,],
+        uniform_target_layers=[8,],
+        filtering_ratio=0.75,
         stride=3,
     )
+    # pruner = UniformPruner(
+    #     target_layers=[3],
+    #     stride=2,
+    # )
     model, processor = load_model(
         model_name="Qwen/Qwen3-VL-2B-Instruct",
         pruner=pruner,
@@ -100,5 +100,5 @@ def main():
         ax.set_yticklabels([])
         ax.grid(color="gray", alpha=0.3, linewidth=0.5)
         ax.tick_params(length=0)
-        plt.savefig(f"assets/visualize_masked_patches/{id}/layer_{layer_idx + 1}.png", bbox_inches='tight', pad_inches=0)
+        plt.savefig(f"assets/visualize_masked_patches/{id}/layer_{layer_idx}.png", bbox_inches='tight', pad_inches=0)
         plt.close()

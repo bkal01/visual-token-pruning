@@ -31,6 +31,8 @@ class FeatherPruner(Pruner):
         hidden_states,
         attention_scores,
         token_types,
+        image_grid_thw,
+        spatial_merge_size,
     ):
         """
         Prunes tokens using FEATHER.
@@ -57,6 +59,9 @@ class FeatherPruner(Pruner):
             keep_mask[visual_indices[topk_relative]] = True
 
         if layer_idx in self.uniform_target_layers:
-            keep_mask[visual_indices[::self.stride]] = True
+            H_tok, W_tok = image_grid_thw[1] // spatial_merge_size, image_grid_thw[2] // spatial_merge_size
+            visual_indices_2d = visual_indices.view(H_tok, W_tok)
+            visual_indices_2d = visual_indices_2d[::self.stride, ::self.stride]
+            keep_mask[visual_indices_2d.flatten()] = True
         
         return hidden_states[:, keep_mask, :], keep_mask
