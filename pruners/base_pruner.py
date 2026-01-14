@@ -18,6 +18,8 @@ class Pruner(ABC):
         hidden_states: torch.Tensor,
         attention_scores: torch.Tensor,
         token_types: torch.Tensor,
+        image_grid_thw: torch.Tensor,
+        spatial_merge_size: int,
     ):
         """
         prune() will be called after a decoder layer's forward pass.

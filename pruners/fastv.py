@@ -22,6 +22,8 @@ class FastVPruner(Pruner):
         hidden_states,
         attention_scores,
         token_types,
+        image_grid_thw,
+        spatial_merge_size,
     ):
         """
         Prunes tokens using FastV: at a given layer, keep the tokens with the highest average attention score received from all other tokens.
