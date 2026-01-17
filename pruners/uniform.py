@@ -8,17 +8,15 @@ class UniformPruner(Pruner):
         target_layers,
         stride,
     ):
-        super().__init__(target_layers)
+        self.target_layers = target_layers
         self.stride = stride
 
-    def prune(
+    def prune_decoder_forward(
         self,
         layer_idx,
         hidden_states,
-        attention_scores,
         token_types,
-        image_grid_thw,
-        spatial_merge_size,
+        **kwargs,
     ):
         """
         Prunes visual tokens uniformly using a stride.
@@ -26,7 +24,10 @@ class UniformPruner(Pruner):
         if the image has been pruned in a previous layer (since len(token_types) < H_tok * W_tok).
         This is fine for now since most pruning methods do uniform sampling just once at the first pruning instance.
         """
-        T = attention_scores.shape[0]
+        image_grid_thw = kwargs["image_grid_thw"]
+        spatial_merge_size = kwargs["spatial_merge_size"]
+
+        T = len(token_types)
         if layer_idx not in self.target_layers:
             return hidden_states, torch.ones(T, dtype=torch.bool, device=token_types.device)
 

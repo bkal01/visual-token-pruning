@@ -152,6 +152,24 @@ class PrunedQwen3VLTextModel(Qwen3VLTextModel):
             surviving_visual_indices = torch.arange(visual_pos_masks[0].sum().item(), device=visual_pos_masks.device)
             self.inference_context.surviving_visual_indices.append(surviving_visual_indices.cpu())
 
+        # [PRUNING MODIFICATION] pruning via prune_embeddings().
+        if is_prefill and self.pruner is not None:
+            hidden_states, keep_mask = self.pruner.prune_embeddings(
+                embeddings=hidden_states,
+                token_types=visual_pos_masks[0],
+            )
+            visual_keep_mask = keep_mask[visual_pos_masks[0]]
+            if not visual_keep_mask.all():
+                surviving_visual_indices = surviving_visual_indices[visual_keep_mask]
+                self.inference_context.surviving_visual_indices.append(surviving_visual_indices.cpu())
+
+            visual_pos_masks = visual_pos_masks[:, keep_mask]
+            cos, sin = position_embeddings
+            position_embeddings = (cos[:, keep_mask, :], sin[:, keep_mask, :])
+            attention_mask = attention_mask[:, :, keep_mask, :][:, :, :, keep_mask]
+            text_position_ids = text_position_ids[:, keep_mask]
+            cache_position = cache_position[keep_mask]
+
         # decoder layers
         for layer_idx, decoder_layer in enumerate(self.layers):
             layer_outputs, layer_attn_weights = decoder_layer(
@@ -167,21 +185,22 @@ class PrunedQwen3VLTextModel(Qwen3VLTextModel):
             
             # [PRUNING MODIFICATION] pruning.
             if is_prefill and visual_pos_masks is not None:
-                avg_layer_attn_weights = layer_attn_weights.mean(dim=1).squeeze(0)
+                avg_layer_attn_weights = layer_attn_weights.mean(dim=1).squeeze(0) # assume B=1 for now.
                 self.inference_context.attentions.append(avg_layer_attn_weights.cpu())
 
                 if self.pruner is not None:
-                    hidden_states, keep_mask = self.pruner.prune(
+                    hidden_states, keep_mask = self.pruner.prune_decoder_forward(
                         layer_idx=layer_idx,
                         hidden_states=hidden_states,
-                        attention_scores=avg_layer_attn_weights,
                         token_types=visual_pos_masks[0],
+                        attention_scores=avg_layer_attn_weights,
                         image_grid_thw=self.inference_context.image_grid_thw,
                         spatial_merge_size=self.inference_context.spatial_merge_size,
                     )
                     visual_keep_mask = keep_mask[visual_pos_masks[0]]
-                    surviving_visual_indices = surviving_visual_indices[visual_keep_mask]
-                    self.inference_context.surviving_visual_indices.append(surviving_visual_indices.cpu())
+                    if not visual_keep_mask.all():
+                        surviving_visual_indices = surviving_visual_indices[visual_keep_mask]
+                        self.inference_context.surviving_visual_indices.append(surviving_visual_indices.cpu())
 
                     visual_pos_masks = visual_pos_masks[:, keep_mask]
                     cos, sin = position_embeddings

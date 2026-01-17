@@ -17,6 +17,7 @@ def run():
 
     from model import load_model, run_inference
     from pruners.fastv import FastVPruner
+    from pruners.token_embeddings import TokenEmbeddingsPruner
     from pruners.feather import FeatherPruner
     from pruners.uniform import UniformPruner
 
@@ -33,6 +34,9 @@ def run():
     # pruner = UniformPruner(
     #     target_layers=[3],
     #     stride=2,
+    # )
+    # pruner = TokenEmbeddingsPruner(
+    #     filtering_ratio=0.5,
     # )
     model, processor = load_model(
         model_name="Qwen/Qwen3-VL-2B-Instruct",
@@ -55,7 +59,7 @@ def run():
     spatial_merge_size = model.model.visual.config.spatial_merge_size
     patch_size = model.model.visual.config.patch_size
 
-    return sample, inference_context.surviving_visual_indices, result.image_grid_thw.cpu(), spatial_merge_size, patch_size, pruner.target_layers
+    return sample, inference_context.surviving_visual_indices, result.image_grid_thw.cpu(), spatial_merge_size, patch_size
 
 
 
@@ -65,7 +69,7 @@ def main():
     id = str(uuid4())
     print(f"Run UUID: {id}")
     os.makedirs(f"assets/visualize_masked_patches/{id}/", exist_ok=True)
-    sample, surviving_visual_indices, image_grid_thw, spatial_merge_size, patch_size, target_layers = run.remote()
+    sample, surviving_visual_indices, image_grid_thw, spatial_merge_size, patch_size = run.remote()
 
     print(f"QUESTION: {sample['question']}")
 
@@ -80,9 +84,9 @@ def main():
 
     token_size = spatial_merge_size * patch_size
 
-    for layer_idx in target_layers:
+    for step_idx in range(1, len(surviving_visual_indices)):
         copy_image_np = image_np.copy() * 0.1
-        for visual_token_index in surviving_visual_indices[layer_idx + 1]:
+        for visual_token_index in surviving_visual_indices[step_idx]:
             row, col = visual_token_index // W_tok, visual_token_index % W_tok
             pixel_start_row = row * token_size
             pixel_start_col = col * token_size
@@ -100,5 +104,5 @@ def main():
         ax.set_yticklabels([])
         ax.grid(color="gray", alpha=0.3, linewidth=0.5)
         ax.tick_params(length=0)
-        plt.savefig(f"assets/visualize_masked_patches/{id}/layer_{layer_idx}.png", bbox_inches='tight', pad_inches=0)
+        plt.savefig(f"assets/visualize_masked_patches/{id}/step_{step_idx}.png", bbox_inches='tight', pad_inches=0)
         plt.close()

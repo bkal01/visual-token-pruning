@@ -12,8 +12,7 @@ class FeatherPruner(Pruner):
         stride,
         rope_override=None,
     ):
-        super().__init__(target_layers)
-        
+        self.target_layers = target_layers
         self.uniform_target_layers = uniform_target_layers
         self.filtering_ratio = filtering_ratio
         self.stride = stride
@@ -25,14 +24,12 @@ class FeatherPruner(Pruner):
             self.rope_config = RoPEConfig.NONE
 
 
-    def prune(
+    def prune_decoder_forward(
         self,
         layer_idx,
         hidden_states,
-        attention_scores,
         token_types,
-        image_grid_thw,
-        spatial_merge_size,
+        **kwargs,
     ):
         """
         Prunes tokens using FEATHER.
@@ -40,7 +37,11 @@ class FeatherPruner(Pruner):
         For layers in `self.uniform_target_layers`, prune tokens uniformly with stride `self.stride`.
         If `layer_idx` is in both, then we keep the union of tokens kept by both methods.
         """
-        T = attention_scores.shape[0]
+        attention_scores = kwargs["attention_scores"]
+        image_grid_thw = kwargs["image_grid_thw"]
+        spatial_merge_size = kwargs["spatial_merge_size"]
+
+        T = len(token_types)
         V = int(token_types.sum())
 
         if layer_idx not in self.target_layers and layer_idx not in self.uniform_target_layers:

@@ -9,27 +9,27 @@ class FastVPruner(Pruner):
         filtering_ratio,
     ):
         """
+        target_layers: list of layers to prune after.
         filtering_ratio: float between 0 and 1, the fraction of tokens to remove at each layer
         """
-        super().__init__(target_layers)
-
+        self.target_layers = target_layers
         self.filtering_ratio = filtering_ratio
 
 
-    def prune(
+    def prune_decoder_forward(
         self,
         layer_idx,
         hidden_states,
-        attention_scores,
         token_types,
-        image_grid_thw,
-        spatial_merge_size,
+        **kwargs,
     ):
         """
         Prunes tokens using FastV: at a given layer, keep the tokens with the highest average attention score received from all other tokens.
         attention_scores is a tensor of shape (T, T), where T is the sequence length.
         token_types is a tensor of shape (T,) with value 0 for text tokens and 1 for visual tokens.
         """
+        attention_scores = kwargs["attention_scores"]
+
         T = attention_scores.shape[0]
         V = int(token_types.sum())
         if layer_idx not in self.target_layers:
