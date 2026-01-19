@@ -27,7 +27,8 @@ class TokenEmbeddingsPruner(Pruner):
         visual_embeddings, text_embeddings = embeddings[visual_indices], embeddings[text_indices]
 
 
-        similarity_scores = torch.matmul(visual_embeddings, text_embeddings.T).mean(dim=-1)
+        similarity_scores = torch.matmul(visual_embeddings, text_embeddings.T).mean(dim=1)
+        self.similarity_scores = similarity_scores
 
         amount_to_keep = int(V * (1 - self.filtering_ratio))
         topk_relative = similarity_scores.topk(amount_to_keep).indices.sort().values

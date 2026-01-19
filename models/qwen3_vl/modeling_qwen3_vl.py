@@ -4,15 +4,26 @@ See https://github.com/huggingface/transformers/blob/main/src/transformers/model
 Changes to forward passes are marked with [PRUNING MODIFICATION].
 """
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 from dataclasses import dataclass
 from typing import List, Optional, Union
 
 from transformers import Qwen3VLForConditionalGeneration
-from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextDecoderLayer,Qwen3VLTextModel, Qwen3VLTextRotaryEmbedding
+from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+    Qwen3VLTextDecoderLayer,Qwen3VLTextModel,
+    Qwen3VLTextRotaryEmbedding,
+    Qwen3VLVisionAttention,
+    Qwen3VLVisionBlock,
+    Qwen3VLVisionModel,
+    apply_rotary_pos_emb_vision,
+    eager_attention_forward,
+)
 from transformers.modeling_rope_utils import dynamic_rope_update
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.masking_utils import create_causal_mask
 from transformers.processing_utils import Unpack
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
@@ -23,7 +34,7 @@ from models.rope_config import RoPEConfig
 @dataclass
 class InferenceContext:
     """
-    Captures context during inference that's useful for pruning.
+    Captures context inside the LLM during inference that's useful for pruning.
     Allows us to pass information between the vision model and the text model.
     attentions: the list of attention scores for each layer. entry i is a tensor of shape (T_i, T_i)
     surviving_visual_indices: the list of indices of the visual tokens that were kept at each layer. entry i is a tensor of shape (V_{i+1},)
@@ -35,28 +46,207 @@ class InferenceContext:
     image_grid_thw: torch.Tensor
     spatial_merge_size: int
 
+@dataclass
+class VisionInferenceContext:
+    """
+    Captures context inside the vision encoder during inference that's useful for pruning.
+    """
+    attentions: List[torch.Tensor]
+    surviving_visual_indices: List[torch.Tensor]
+    image_grid_thw: torch.Tensor
+    spatial_merge_size: int
 
 class PrunedQwen3VL(Qwen3VLForConditionalGeneration):
     def __init__(self, config):
         super().__init__(config)
+
+        old_vision = self.model.visual
+        self.model.visual = PrunedQwen3VLVisionModel(config.vision_config)
+        self.model.visual.load_state_dict(old_vision.state_dict())
+
         old_lm = self.model.language_model
         self.model.language_model = PrunedQwen3VLTextModel(config.text_config)
         self.model.language_model.load_state_dict(old_lm.state_dict())
 
+        self.model.visual.inference_context.spatial_merge_size = config.vision_config.spatial_merge_size
         self.model.language_model.inference_context.spatial_merge_size = config.vision_config.spatial_merge_size
 
     def set_pruner(self, pruner):
+        self.model.visual.pruner = pruner
         self.model.language_model.pruner = pruner
 
     def set_rope_config(self, rope_config):
         self.model.language_model.rope_config = rope_config
 
     def set_image_grid_thw(self, image_grid_thw):
+        self.model.visual.inference_context.image_grid_thw = image_grid_thw
         self.model.language_model.inference_context.image_grid_thw = image_grid_thw
 
     def get_inference_context(self):
         return self.model.language_model.inference_context
 
+    def get_vision_inference_context(self):
+        return self.model.visual.inference_context
+
+
+class PrunedQwen3VLVisionModel(Qwen3VLVisionModel):
+    def __init__(self, config, *inputs, **kwargs):
+        super().__init__(config, *inputs, **kwargs)
+
+        old_blocks = self.blocks
+        self.blocks = nn.ModuleList([PrunedQwen3VLVisionBlock(config) for _ in range(config.depth)])
+        self.blocks.load_state_dict(old_blocks.state_dict())
+
+        self.pruner = None
+        self.inference_context = VisionInferenceContext(
+            attentions=[],
+            surviving_visual_indices=[],
+            image_grid_thw=None,
+            spatial_merge_size=0,
+        )
+
+    def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, **kwargs) -> torch.Tensor:
+        """
+        Args:
+            hidden_states (`torch.Tensor` of shape `(seq_len, hidden_size)`):
+                The final hidden states of the model.
+            grid_thw (`torch.Tensor` of shape `(num_images_or_videos, 3)`):
+                The temporal, height and width of feature shape of each image in LLM.
+
+        Returns:
+            `torch.Tensor`: hidden_states.
+        """
+        hidden_states = self.patch_embed(hidden_states)
+
+        pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
+        hidden_states = hidden_states + pos_embeds
+
+        rotary_pos_emb = self.rot_pos_emb(grid_thw)
+
+        seq_len, _ = hidden_states.size()
+        hidden_states = hidden_states.reshape(seq_len, -1)
+        rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
+        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+        position_embeddings = (emb.cos(), emb.sin())
+
+        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
+            dim=0,
+            # Select dtype based on the following factors:
+            #  - FA2 requires that cu_seqlens_q must have dtype int32
+            #  - torch.onnx.export requires that cu_seqlens_q must have same dtype as grid_thw
+            # See https://github.com/huggingface/transformers/pull/34852 for more information
+            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
+        )
+        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+
+        surviving_visual_indices = torch.arange(hidden_states.shape[0], device=hidden_states.device)
+        self.inference_context.surviving_visual_indices.append(surviving_visual_indices.cpu())
+
+        deepstack_feature_lists = []
+        for layer_num, blk in enumerate(self.blocks):
+            hidden_states, layer_attn_weights = blk(
+                hidden_states,
+                cu_seqlens=cu_seqlens,
+                position_embeddings=position_embeddings,
+                **kwargs,
+            )
+            avg_layer_attn_weights = layer_attn_weights.mean(dim=1).squeeze(0) # assume B=1 for now.
+            self.inference_context.attentions.append(avg_layer_attn_weights.cpu())
+            if self.pruner is not None:
+                hidden_states, keep_mask = self.pruner.prune_vision_forward(
+                    layer_idx=layer_num,
+                    hidden_states=hidden_states,
+                    attention_scores=avg_layer_attn_weights,
+                )
+                if not keep_mask.all():
+                    surviving_visual_indices = surviving_visual_indices[keep_mask]
+                    self.inference_context.surviving_visual_indices.append(surviving_visual_indices.cpu())
+
+            if layer_num in self.deepstack_visual_indexes:
+                deepstack_feature = self.deepstack_merger_list[self.deepstack_visual_indexes.index(layer_num)](
+                    hidden_states
+                )
+                deepstack_feature_lists.append(deepstack_feature)
+
+        hidden_states = self.merger(hidden_states)
+
+        return hidden_states, deepstack_feature_lists
+
+class PrunedQwen3VLVisionBlock(Qwen3VLVisionBlock):
+    def __init__(self, config):
+        super().__init__(config)
+        self.attn = PrunedQwen3VLVisionAttention(config=config)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        rotary_pos_emb: Optional[torch.Tensor] = None,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        attn_output, attn_weights = self.attn(
+            self.norm1(hidden_states),
+            cu_seqlens=cu_seqlens,
+            rotary_pos_emb=rotary_pos_emb,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
+        hidden_states = hidden_states + attn_output
+        hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
+        return hidden_states, attn_weights
+
+class PrunedQwen3VLVisionAttention(Qwen3VLVisionAttention):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        rotary_pos_emb: Optional[torch.Tensor] = None,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        seq_length = hidden_states.shape[0]
+        query_states, key_states, value_states = (
+            self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
+        )
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb_vision(query_states, key_states, cos, sin)
+
+        query_states = query_states.transpose(0, 1).unsqueeze(0)
+        key_states = key_states.transpose(0, 1).unsqueeze(0)
+        value_states = value_states.transpose(0, 1).unsqueeze(0)
+
+        attention_interface = eager_attention_forward
+        if self.config._attn_implementation != "eager":
+            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+
+        # Non-Flash Attention Path
+        lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        splits = [
+            torch.split(tensor, lengths.tolist(), dim=2) for tensor in (query_states, key_states, value_states)
+        ]
+
+        attn_interface_outputs = [
+            attention_interface(
+                self,
+                q,
+                k,
+                v,
+                attention_mask=None,
+                scaling=self.scaling,
+                dropout=0.0 if not self.training else self.attention_dropout,
+                is_causal=False,
+                **kwargs,
+            )
+            for q, k, v in zip(*splits)
+        ]
+        attn_outputs, attn_weights = [attn_interface_output[0] for attn_interface_output in attn_interface_outputs], [attn_interface_output[1] for attn_interface_output in attn_interface_outputs]
+        # assuming B=1, these cats should do nothing.
+        attn_output = torch.cat(attn_outputs, dim=1)
+        attn_weights = torch.cat(attn_weights, dim=1)
+        attn_output = attn_output.reshape(seq_length, -1).contiguous()
+        attn_output = self.proj(attn_output)
+        return attn_output, attn_weights
 
 class PrunedQwen3VLTextModel(Qwen3VLTextModel):
     def __init__(self, config):
