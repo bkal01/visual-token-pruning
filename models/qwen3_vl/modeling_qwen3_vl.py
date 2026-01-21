@@ -12,7 +12,9 @@ from typing import List, Optional, Union
 
 from transformers import Qwen3VLForConditionalGeneration
 from transformers.models.qwen3_vl.modeling_qwen3_vl import (
-    Qwen3VLTextDecoderLayer,Qwen3VLTextModel,
+    Qwen3VLModel,
+    Qwen3VLTextDecoderLayer,
+    Qwen3VLTextModel,
     Qwen3VLTextRotaryEmbedding,
     Qwen3VLVisionAttention,
     Qwen3VLVisionBlock,
@@ -60,6 +62,10 @@ class PrunedQwen3VL(Qwen3VLForConditionalGeneration):
     def __init__(self, config):
         super().__init__(config)
 
+        old_model = self.model
+        self.model = PrunedQwen3VLModel(config)
+        self.model.load_state_dict(old_model.state_dict())
+
         old_vision = self.model.visual
         self.model.visual = PrunedQwen3VLVisionModel(config.vision_config)
         self.model.visual.load_state_dict(old_vision.state_dict())
@@ -87,6 +93,75 @@ class PrunedQwen3VL(Qwen3VLForConditionalGeneration):
 
     def get_vision_inference_context(self):
         return self.model.visual.inference_context
+
+class PrunedQwen3VLModel(Qwen3VLModel):
+    def get_image_features(self, pixel_values: torch.FloatTensor, image_grid_thw: Optional[torch.LongTensor] = None):
+        """
+        Encodes images into continuous embeddings that can be forwarded to the language model. The deepstack visual features are also returned.
+
+        Args:
+            pixel_values (`torch.FloatTensor` of shape `(batch_size, num_channels, image_size, image_size)`):
+                The tensors corresponding to the input images.
+            image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
+                The temporal, height and width of feature shape of each image in LLM.
+        """
+        pixel_values = pixel_values.type(self.visual.dtype)
+        image_embeds, deepstack_image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
+        # [PRUNING MODIFICATION] we need to modify this function to handle image_embeds changing shape from pruning.
+        # since we're assuming B=1, we can just wrap image_embeds in a tuple to simulate what torch.split would do.
+        # split_sizes = (image_grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
+        # image_embeds = torch.split(image_embeds, split_sizes)
+        return (image_embeds,), deepstack_image_embeds
+
+    def get_placeholder_mask(
+        self,
+        input_ids: torch.LongTensor,
+        inputs_embeds: torch.FloatTensor,
+        image_features: Optional[torch.FloatTensor] = None,
+        video_features: Optional[torch.FloatTensor] = None,
+    ):
+        """
+        Obtains multimodal placeholder mask from `input_ids` or `inputs_embeds`, and checks that the placeholder token count is
+        equal to the length of multimodal features. If the lengths are different, an error is raised.
+        """
+        # [PRUNING MODIFICATION] if we have pruned in the vision encoder, then we need to ensure that the returned image mask accounts
+        # for any pruned tokens. this output is used to populate visual_pos_masks in the text model.
+        # we will construct it using the last entry in self.visual.inference_context.surviving_visual_indices.
+        special_image_mask = input_ids == self.config.image_token_id
+        self.visual.inference_context.surviving_visual_indices[-1]
+        print(f"special_image_mask shape: {special_image_mask.shape}")
+        print(f"surviving_visual_indices shape: {self.visual.inference_context.surviving_visual_indices[-1].shape}")
+        exit()
+        return None, None
+        if input_ids is None:
+            special_image_mask = inputs_embeds == self.get_input_embeddings()(
+                torch.tensor(self.config.image_token_id, dtype=torch.long, device=inputs_embeds.device)
+            )
+            special_image_mask = special_image_mask.all(-1)
+            special_video_mask = inputs_embeds == self.get_input_embeddings()(
+                torch.tensor(self.config.video_token_id, dtype=torch.long, device=inputs_embeds.device)
+            )
+            special_video_mask = special_video_mask.all(-1)
+        else:
+            special_image_mask = input_ids == self.config.image_token_id
+            special_video_mask = input_ids == self.config.video_token_id
+
+        n_image_tokens = special_image_mask.sum()
+        special_image_mask = special_image_mask.unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
+        if image_features is not None and inputs_embeds[special_image_mask].numel() != image_features.numel():
+            raise ValueError(
+                f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {image_features.shape[0]}"
+            )
+
+        n_video_tokens = special_video_mask.sum()
+        special_video_mask = special_video_mask.unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
+        if video_features is not None and inputs_embeds[special_video_mask].numel() != video_features.numel():
+            raise ValueError(
+                f"Videos features and video tokens do not match: tokens: {n_video_tokens}, features {video_features.shape[0]}"
+            )
+
+        return special_image_mask, special_video_mask
+
 
 
 class PrunedQwen3VLVisionModel(Qwen3VLVisionModel):
