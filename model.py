@@ -36,7 +36,7 @@ def run_inference(
     processor,
     image,
     question,
-    max_new_tokens=128,
+    max_new_tokens=1024,
 ):
     """
     Runs inference for a single sample. Does full generation.

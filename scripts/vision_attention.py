@@ -12,30 +12,37 @@ def run():
     from model import load_model, run_inference
     from pruners.visiondrop import VisionDropPruner
 
+
+    pruner = VisionDropPruner(
+        vision_target_layers=[23,],
+        llm_target_layers=[8,16,24,27,],
+        filtering_ratio=0.5,
+    )
     model, processor = load_model(
         model_name="Qwen/Qwen3-VL-2B-Instruct",
-        pruner=VisionDropPruner(
-            vision_target_layers=[23,],
-            llm_target_layers=[8,16,24,27,],
-            filtering_ratio=0.5,
-        ),
-        rope_config=None,
     )
+    model.model.visual.pruner = pruner
     dataset = iter(load_dataset("DatologyAI/DatBench", "math", split="test", streaming=True))
     sample = next(dataset)
 
-    run_inference(
+    result = run_inference(
         model,
         processor,
         sample["image"],
         sample["question"],
     )
 
+    generated_ids_trimmed = result.generated_ids[:, result.input_ids.shape[0]:]
+    output_text = processor.batch_decode(generated_ids_trimmed, skip_special_tokens=True)[0]
+    print(f"Question: {sample['question']}")
+    print(f"Model output: {output_text}")
+
     inference_context = model.get_inference_context()
     vision_inference_context = model.get_vision_inference_context()
 
     print(f"number of vision attention scores: {len(vision_inference_context.attentions)}")
     print(f"vision_inference_context.attentions[0].shape: {vision_inference_context.attentions[0].shape}")
+    print(f"vision_inference_context.attentions[-1].shape: {vision_inference_context.attentions[-1].shape}")
 
 
 

@@ -25,22 +25,31 @@ class VisionDropPruner(Pruner):
         **kwargs,
     ):
         """
-        Prunes tokens using VisionDrop (https://arxiv.org/pdf/2506.22283). 
+        Prunes tokens using VisionDrop (https://arxiv.org/pdf/2506.22283).
+        As a modification, we average attention scores across groups of patches of size spatial_merge_size^2.
+        Then when pruning, we prune entire groups of patches at once.
         """
         attention_scores = kwargs["attention_scores"]
+        spatial_merge_size = kwargs["spatial_merge_size"]
+        group_size = spatial_merge_size**2
 
         # P is the number of patches in the VLM.
         P = attention_scores.shape[0]
+        if P % group_size != 0:
+            raise ValueError(f"P must be divisible by spatial_merge_size**2, but P={P} and spatial_merge_size={spatial_merge_size}")
 
         if layer_idx not in self.vision_target_layers:
             return hidden_states, torch.ones(P, dtype=torch.bool, device=attention_scores.device)
 
 
         visual_token_scores = attention_scores.mean(dim=0)
+        per_group_scores = visual_token_scores.view((P // group_size, group_size)).mean(dim=1)
 
-        amount_to_keep = int(P * (1 - self.filtering_ratio))
-        topk_indices = visual_token_scores.topk(amount_to_keep).indices
+        amount_to_keep = int(P // group_size * (1 - self.filtering_ratio))
+        topk_indices = per_group_scores.topk(amount_to_keep).indices
 
         keep_mask = torch.zeros(P, dtype=torch.bool, device=attention_scores.device)
-        keep_mask[topk_indices] = True
+        offsets = torch.arange(group_size, device=attention_scores.device)
+        expanded_indices = (topk_indices.unsqueeze(1) * group_size + offsets).flatten()
+        keep_mask[expanded_indices] = True
         return hidden_states[keep_mask, :], keep_mask

@@ -13,6 +13,7 @@ from typing import List, Optional, Union
 from transformers import Qwen3VLForConditionalGeneration
 from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLModel,
+    Qwen3VLModelOutputWithPast,
     Qwen3VLTextDecoderLayer,
     Qwen3VLTextModel,
     Qwen3VLTextRotaryEmbedding,
@@ -124,15 +125,6 @@ class PrunedQwen3VLModel(Qwen3VLModel):
         Obtains multimodal placeholder mask from `input_ids` or `inputs_embeds`, and checks that the placeholder token count is
         equal to the length of multimodal features. If the lengths are different, an error is raised.
         """
-        # [PRUNING MODIFICATION] if we have pruned in the vision encoder, then we need to ensure that the returned image mask accounts
-        # for any pruned tokens. this output is used to populate visual_pos_masks in the text model.
-        # we will construct it using the last entry in self.visual.inference_context.surviving_visual_indices.
-        special_image_mask = input_ids == self.config.image_token_id
-        self.visual.inference_context.surviving_visual_indices[-1]
-        print(f"special_image_mask shape: {special_image_mask.shape}")
-        print(f"surviving_visual_indices shape: {self.visual.inference_context.surviving_visual_indices[-1].shape}")
-        exit()
-        return None, None
         if input_ids is None:
             special_image_mask = inputs_embeds == self.get_input_embeddings()(
                 torch.tensor(self.config.image_token_id, dtype=torch.long, device=inputs_embeds.device)
@@ -148,10 +140,11 @@ class PrunedQwen3VLModel(Qwen3VLModel):
 
         n_image_tokens = special_image_mask.sum()
         special_image_mask = special_image_mask.unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
-        if image_features is not None and inputs_embeds[special_image_mask].numel() != image_features.numel():
-            raise ValueError(
-                f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {image_features.shape[0]}"
-            )
+        # [PRUNING MODIFICATION] we ignore this check because image_features might be smaller.
+        # if image_features is not None and inputs_embeds[special_image_mask].numel() != image_features.numel():
+        #     raise ValueError(
+        #         f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {image_features.shape[0]}"
+        #     )
 
         n_video_tokens = special_video_mask.sum()
         special_video_mask = special_video_mask.unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
@@ -161,6 +154,163 @@ class PrunedQwen3VLModel(Qwen3VLModel):
             )
 
         return special_image_mask, special_video_mask
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        pixel_values_videos: Optional[torch.FloatTensor] = None,
+        image_grid_thw: Optional[torch.LongTensor] = None,
+        video_grid_thw: Optional[torch.LongTensor] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> Union[tuple, Qwen3VLModelOutputWithPast]:
+        r"""
+        image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
+            The temporal, height and width of feature shape of each image in LLM.
+        video_grid_thw (`torch.LongTensor` of shape `(num_videos, 3)`, *optional*):
+            The temporal, height and width of feature shape of each video in LLM.
+        """
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+        if inputs_embeds is None:
+            inputs_embeds = self.get_input_embeddings()(input_ids)
+
+        if position_ids is None:
+            past_key_values_length = 0 if past_key_values is None else past_key_values.get_seq_length()
+            if self.rope_deltas is None or past_key_values_length == 0:
+                position_ids, rope_deltas = self.get_rope_index(
+                    input_ids,
+                    image_grid_thw,
+                    video_grid_thw,
+                    attention_mask=attention_mask,
+                )
+                self.rope_deltas = rope_deltas
+            # then use the prev pre-calculated rope-deltas to get the correct position ids
+            else:
+                batch_size, seq_length, _ = inputs_embeds.shape
+                delta = (past_key_values_length + self.rope_deltas).to(inputs_embeds.device)
+                position_ids = torch.arange(seq_length, device=inputs_embeds.device)
+                position_ids = position_ids.view(1, -1).expand(batch_size, -1)
+                if cache_position is not None:  # otherwise `deltas` is an int `0`
+                    delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
+                position_ids = position_ids.add(delta)
+                position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+
+        image_mask = None
+        video_mask = None
+
+        if pixel_values is not None:
+            image_embeds, deepstack_image_embeds = self.get_image_features(pixel_values, image_grid_thw)
+            image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+            image_mask, _ = self.get_placeholder_mask(
+                input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
+            )
+
+            surviving_visual_indices = self.visual.inference_context.surviving_visual_indices[-1].to(inputs_embeds.device)
+            surviving_token_indices = torch.unique(surviving_visual_indices // self.visual.inference_context.spatial_merge_size**2)
+            num_remaining_visual_tokens = len(surviving_token_indices)
+            visual_indices = torch.where(image_mask[0].all(dim=1))[0]
+            start, end = visual_indices[0], visual_indices[-1] + 1
+
+            image_mask = torch.cat([
+                image_mask[:, :start],
+                image_mask[:, start:start + num_remaining_visual_tokens],
+                image_mask[:, end:],
+            ], dim=1)
+            input_ids = torch.cat([
+                input_ids[:, :start],
+                input_ids[:, start:start + num_remaining_visual_tokens],
+                input_ids[:, end:],
+            ], dim=1)
+            visual_inputs_embeds = inputs_embeds[:, start:end, :]
+            inputs_embeds = torch.cat([
+                inputs_embeds[:, :start],
+                visual_inputs_embeds[:, surviving_token_indices, :],
+                inputs_embeds[:, end:],
+            ], dim=1)
+            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+
+            if attention_mask is not None:
+                attention_mask = torch.cat([
+                    attention_mask[:, :start],
+                    attention_mask[:, start:start + num_remaining_visual_tokens],
+                    attention_mask[:, end:],
+                ], dim=1)
+            print(f"position_ids shape: {position_ids.shape}")
+            position_ids = torch.cat([
+                position_ids[:, :, :start],
+                position_ids[:, :, start:start + num_remaining_visual_tokens],
+                position_ids[:, :, end:],
+            ], dim=2)
+            print(f"position_ids shape: {position_ids.shape}")
+
+            if cache_position is not None:
+                cache_position = torch.cat([
+                    cache_position[:start],
+                    cache_position[start:start + num_remaining_visual_tokens],
+                    cache_position[end:]
+                ])
+
+            if deepstack_image_embeds is not None:
+                deepstack_image_embeds = [
+                    embed[surviving_token_indices, :] for embed in deepstack_image_embeds
+                ]
+
+        if pixel_values_videos is not None:
+            video_embeds, deepstack_video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw)
+            video_embeds = torch.cat(video_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+            _, video_mask = self.get_placeholder_mask(
+                input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds
+            )
+            inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+
+        visual_pos_masks = None
+        deepstack_visual_embeds = None
+        if image_mask is not None and video_mask is not None:
+            # aggregate visual_pos_masks and deepstack_visual_embeds
+            image_mask = image_mask[..., 0]
+            video_mask = video_mask[..., 0]
+            visual_pos_masks = image_mask | video_mask
+            deepstack_visual_embeds = []
+            image_mask_joint = image_mask[visual_pos_masks]
+            video_mask_joint = video_mask[visual_pos_masks]
+            for img_embed, vid_embed in zip(deepstack_image_embeds, deepstack_video_embeds):
+                embed_joint = img_embed.new_zeros(visual_pos_masks.sum(), img_embed.shape[-1]).to(img_embed.device)
+                embed_joint[image_mask_joint, :] = img_embed
+                embed_joint[video_mask_joint, :] = vid_embed
+                deepstack_visual_embeds.append(embed_joint)
+        elif image_mask is not None:
+            image_mask = image_mask[..., 0]
+            visual_pos_masks = image_mask
+            deepstack_visual_embeds = deepstack_image_embeds
+        elif video_mask is not None:
+            video_mask = video_mask[..., 0]
+            visual_pos_masks = video_mask
+            deepstack_visual_embeds = deepstack_video_embeds
+
+        outputs = self.language_model(
+            input_ids=None,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            cache_position=cache_position,
+            visual_pos_masks=visual_pos_masks,
+            deepstack_visual_embeds=deepstack_visual_embeds,
+            **kwargs,
+        )
+
+        return Qwen3VLModelOutputWithPast(
+            last_hidden_state=outputs.last_hidden_state,
+            past_key_values=outputs.past_key_values,
+            rope_deltas=self.rope_deltas,
+        )
 
 
 
@@ -232,6 +382,7 @@ class PrunedQwen3VLVisionModel(Qwen3VLVisionModel):
                     layer_idx=layer_num,
                     hidden_states=hidden_states,
                     attention_scores=avg_layer_attn_weights,
+                    spatial_merge_size=self.config.spatial_merge_size,
                 )
                 if not keep_mask.all():
                     surviving_visual_indices = surviving_visual_indices[keep_mask]
