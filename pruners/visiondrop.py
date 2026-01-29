@@ -53,3 +53,33 @@ class VisionDropPruner(Pruner):
         expanded_indices = (topk_indices.unsqueeze(1) * group_size + offsets).flatten()
         keep_mask[expanded_indices] = True
         return hidden_states[keep_mask, :], keep_mask
+
+    def prune_decoder_forward(
+        self,
+        layer_idx,
+        hidden_states,
+        token_types,
+        **kwargs,
+    ):
+        """
+        Prunes tokens using VisionDrop.
+        Visual tokens are pruned according to the average attention score received from all other **visual** tokens.
+        Attention scores from text tokens are ignored.
+        """
+        attention_scores = kwargs["attention_scores"]
+
+        T = len(token_types)
+        V = int(token_types.sum())
+
+        if layer_idx not in self.llm_target_layers:
+            return hidden_states, torch.ones(T, dtype=torch.bool, device=token_types.device)
+
+        keep_mask = ~token_types.bool()
+        visual_indices = token_types.nonzero(as_tuple=True)[0]
+        visual_token_scores = attention_scores[visual_indices.unsqueeze(1), visual_indices].mean(dim=0)
+
+        amount_to_keep = int(V * (1 - self.filtering_ratio))
+        topk_relative = visual_token_scores.topk(amount_to_keep).indices.sort().values
+
+        keep_mask[visual_indices[topk_relative]] = True
+        return hidden_states[:, keep_mask, :], keep_mask
