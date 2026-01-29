@@ -3,7 +3,7 @@ import torch
 from dataclasses import dataclass
 from transformers import AutoProcessor
 
-from models.qwen3_vl.modeling_qwen3_vl import InferenceContext, PrunedQwen3VL
+from models.qwen3_vl.modeling_qwen3_vl import InferenceContext, VisionInferenceContext, PrunedQwen3VL
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -29,6 +29,7 @@ class VLMInferenceResult():
     image_grid_thw: torch.Tensor
     generated_ids: torch.Tensor = None
     inference_context: InferenceContext = None
+    vision_inference_context: VisionInferenceContext = None
 
 
 def run_inference(
@@ -85,7 +86,8 @@ def run_inference(
         input_ids=input_ids,
         image_grid_thw=image_grid_thw,
         generated_ids=generated_ids,
-        inference_context=model.language_model.inference_context,
+        inference_context=model.model.language_model.inference_context,
+        vision_inference_context=model.model.visual.inference_context,
     )
 
 
@@ -133,5 +135,7 @@ def run_prefill(
 
     return VLMInferenceResult(
         input_ids=input_ids,
-        inference_context=model.language_model.inference_context,
+        image_grid_thw=inputs["image_grid_thw"][0],
+        inference_context=model.model.language_model.inference_context,
+        vision_inference_context=model.model.visual.inference_context,
     )

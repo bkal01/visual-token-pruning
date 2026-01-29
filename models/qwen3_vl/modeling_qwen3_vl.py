@@ -242,13 +242,11 @@ class PrunedQwen3VLModel(Qwen3VLModel):
                     attention_mask[:, start:start + num_remaining_visual_tokens],
                     attention_mask[:, end:],
                 ], dim=1)
-            print(f"position_ids shape: {position_ids.shape}")
             position_ids = torch.cat([
                 position_ids[:, :, :start],
                 position_ids[:, :, start:start + num_remaining_visual_tokens],
                 position_ids[:, :, end:],
             ], dim=2)
-            print(f"position_ids shape: {position_ids.shape}")
 
             if cache_position is not None:
                 cache_position = torch.cat([
