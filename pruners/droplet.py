@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 from pruners.base_pruner import Pruner
 
@@ -29,7 +30,7 @@ class Droplet(Pruner):
         visual_indices, text_indices = token_types.nonzero(as_tuple=True)[0], (~token_types).nonzero(as_tuple=True)[0]
         visual_hidden_states, text_hidden_states = hidden_states[visual_indices], hidden_states[text_indices]
 
-        similarity_scores = torch.matmul(visual_hidden_states, text_hidden_states.T).mean(dim=1)
+        similarity_scores = torch.matmul(F.normalize(visual_hidden_states, dim=1), F.normalize(text_hidden_states, dim=1).T).mean(dim=1)
 
         amount_to_keep = int(V * (1 - self.filtering_ratio))
         topk_relative = similarity_scores.topk(amount_to_keep).indices.sort().values
