@@ -20,17 +20,18 @@ def run():
     from pruners.token_embeddings import TokenEmbeddingsPruner
     from pruners.feather import FeatherPruner
     from pruners.uniform import UniformPruner
+    from pruners.droplet import Droplet
 
     # pruner = FastVPruner(
     #     target_layers=[1], # FastV paper prunes after layer 2's forward pass.
     #     filtering_ratio=0.5,
     # )
-    pruner = FeatherPruner(
-        target_layers=[8,16,],
-        uniform_target_layers=[8,],
-        filtering_ratio=0.75,
-        stride=3,
-    )
+    # pruner = FeatherPruner(
+    #     target_layers=[8,16,],
+    #     uniform_target_layers=[8,],
+    #     filtering_ratio=0.75,
+    #     stride=3,
+    # )
     # pruner = UniformPruner(
     #     target_layers=[3],
     #     stride=2,
@@ -38,6 +39,10 @@ def run():
     # pruner = TokenEmbeddingsPruner(
     #     filtering_ratio=0.5,
     # )
+    pruner = Droplet(
+        target_layers=[8,16,24,27],
+        filtering_ratio=0.2,
+    )
     model, processor = load_model(
         model_name="Qwen/Qwen3-VL-2B-Instruct",
         pruner=pruner,

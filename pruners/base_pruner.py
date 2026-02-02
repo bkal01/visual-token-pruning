@@ -13,10 +13,15 @@ class Pruner(ABC):
 
     def prune_vision_forward(
         self,
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        **kwargs,
     ):
         """
         prune_vision_forward() will be called in the vision encoder's forward pass.
         """
+        V = hidden_states.shape[0]
+        return hidden_states, torch.ones(V, dtype=torch.bool, device=hidden_states.device)
 
     def prune_embeddings(
         self,
