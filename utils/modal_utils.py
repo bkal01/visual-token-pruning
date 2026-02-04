@@ -1,5 +1,6 @@
 import modal
 
+
 def get_modal_image():
     image = (
         modal.Image.debian_slim(
@@ -15,7 +16,11 @@ def get_modal_image():
                 "torchvision>=0.15.0",
                 "pillow>=10.0.0",
                 "matplotlib",
-                "datasets",
+                "datasets>=2.14.0",
+                "pyarrow>=14.0.0,<19.0.0",
+                "fsspec>=2023.10.0,<2024.12.0",
+                "pandas",
+                "datbench @ git+https://github.com/datologyai/DatBench.git",
             ],
         )
         .add_local_dir(
@@ -30,9 +35,9 @@ def get_modal_image():
             local_path="pruners",
             remote_path="/root/pruners",
         )
-        .add_local_file(
-            local_path="visualization.py",
-            remote_path="/root/visualization.py",
+        .add_local_dir(
+            local_path="eval",
+            remote_path="/root/eval",
         )
         .add_local_file(
             local_path="model.py",
