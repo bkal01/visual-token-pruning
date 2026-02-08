@@ -2,6 +2,7 @@ import torch
 
 from pruners.base_pruner import Pruner
 
+
 class VisionDropPruner(Pruner):
     def __init__(
         self,
@@ -26,8 +27,8 @@ class VisionDropPruner(Pruner):
     ):
         """
         Prunes tokens using VisionDrop (https://arxiv.org/pdf/2506.22283).
-        As a modification, we average attention scores across groups of patches of size spatial_merge_size^2.
-        Then when pruning, we prune entire groups of patches at once.
+        As a modification, we average attention scores across groups of patches of size spatial_merge_size^2 tokens.
+        Then when pruning, we prune at the patch-level, not the token-level.
         """
         attention_scores = kwargs["attention_scores"]
         spatial_merge_size = kwargs["spatial_merge_size"]
@@ -36,14 +37,19 @@ class VisionDropPruner(Pruner):
         # P is the number of patches in the VLM.
         P = attention_scores.shape[0]
         if P % group_size != 0:
-            raise ValueError(f"P must be divisible by spatial_merge_size**2, but P={P} and spatial_merge_size={spatial_merge_size}")
+            raise ValueError(
+                f"P must be divisible by spatial_merge_size**2, but P={P} and spatial_merge_size={spatial_merge_size}"
+            )
 
         if layer_idx not in self.vision_target_layers:
-            return hidden_states, torch.ones(P, dtype=torch.bool, device=attention_scores.device)
-
+            return hidden_states, torch.ones(
+                P, dtype=torch.bool, device=attention_scores.device
+            )
 
         visual_token_scores = attention_scores.mean(dim=0)
-        per_group_scores = visual_token_scores.view((P // group_size, group_size)).mean(dim=1)
+        per_group_scores = visual_token_scores.view((P // group_size, group_size)).mean(
+            dim=1
+        )
 
         amount_to_keep = int(P // group_size * (1 - self.filtering_ratio))
         topk_indices = per_group_scores.topk(amount_to_keep).indices
@@ -72,11 +78,15 @@ class VisionDropPruner(Pruner):
         V = int(token_types.sum())
 
         if layer_idx not in self.llm_target_layers:
-            return hidden_states, torch.ones(T, dtype=torch.bool, device=token_types.device)
+            return hidden_states, torch.ones(
+                T, dtype=torch.bool, device=token_types.device
+            )
 
         keep_mask = ~token_types.bool()
         visual_indices = token_types.nonzero(as_tuple=True)[0]
-        visual_token_scores = attention_scores[visual_indices.unsqueeze(1), visual_indices].mean(dim=0)
+        visual_token_scores = attention_scores[
+            visual_indices.unsqueeze(1), visual_indices
+        ].mean(dim=0)
 
         amount_to_keep = int(V * (1 - self.filtering_ratio))
         topk_relative = visual_token_scores.topk(amount_to_keep).indices.sort().values

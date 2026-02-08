@@ -25,7 +25,7 @@ DEFAULT_PARAMS = {
         "filtering_ratio": 0.2,
     },
     "visiondrop": {
-        "vision_target_layers": [],
+        "vision_target_layers": [23],
         "llm_target_layers": [8, 16, 24, 27],
         "filtering_ratio": 0.2,
     },

@@ -20,7 +20,7 @@ def get_modal_image():
                 "pyarrow>=14.0.0,<19.0.0",
                 "fsspec>=2023.10.0,<2024.12.0",
                 "pandas",
-                "datbench @ git+https://github.com/datologyai/DatBench.git",
+                "datbench @ git+https://github.com/bkal01/DatBench.git@fix/boxed-parsing",
             ],
         )
         .add_local_dir(
