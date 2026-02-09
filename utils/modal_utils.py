@@ -20,6 +20,7 @@ def get_modal_image():
                 "pyarrow>=14.0.0,<19.0.0",
                 "fsspec>=2023.10.0,<2024.12.0",
                 "pandas",
+                "accelerate",
                 "datbench @ git+https://github.com/bkal01/DatBench.git@fix/boxed-parsing",
             ],
         )
