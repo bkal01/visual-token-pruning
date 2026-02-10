@@ -39,13 +39,11 @@ class InferenceContext:
     """
     Captures context inside the LLM during inference that's useful for pruning.
     Allows us to pass information between the vision model and the text model.
-    attentions: the list of attention scores for each layer. entry i is a tensor of shape (T_i, T_i)
     surviving_visual_indices: the list of indices of the visual tokens that were kept at each layer. entry i is a tensor of shape (V_{i+1},)
     image_grid_thw: the T,H,W dimensions of the input image.
     spatial_merge_size: how many patches get combined into a token via the VLM adapter.
     """
 
-    attentions: list[torch.Tensor]
     surviving_visual_indices: list[torch.Tensor]
     image_grid_thw: torch.Tensor
     spatial_merge_size: int
@@ -57,7 +55,6 @@ class VisionInferenceContext:
     Captures context inside the vision encoder during inference that's useful for pruning.
     """
 
-    attentions: list[torch.Tensor]
     surviving_visual_indices: list[torch.Tensor]
     image_grid_thw: torch.Tensor
     spatial_merge_size: int
@@ -393,7 +390,6 @@ class PrunedQwen3VLVisionModel(Qwen3VLVisionModel):
 
         self.pruner = None
         self.inference_context = VisionInferenceContext(
-            attentions=[],
             surviving_visual_indices=[],
             image_grid_thw=None,
             spatial_merge_size=0,
@@ -454,7 +450,6 @@ class PrunedQwen3VLVisionModel(Qwen3VLVisionModel):
             avg_layer_attn_weights = layer_attn_weights.mean(dim=1).squeeze(
                 0
             )  # assume B=1 for now.
-            self.inference_context.attentions.append(avg_layer_attn_weights.cpu())
             if self.pruner is not None:
                 hidden_states, keep_mask = self.pruner.prune_vision_forward(
                     layer_idx=layer_num,
@@ -470,6 +465,18 @@ class PrunedQwen3VLVisionModel(Qwen3VLVisionModel):
                     self.inference_context.surviving_visual_indices.append(
                         surviving_visual_indices.cpu()
                     )
+
+                    cos, sin = position_embeddings
+                    position_embeddings = (cos[keep_mask], sin[keep_mask])
+                    new_len = keep_mask.sum().item()
+                    cu_seqlens = torch.tensor(
+                        [0, new_len], device=cu_seqlens.device, dtype=cu_seqlens.dtype
+                    )
+
+                    for i in range(len(deepstack_feature_lists)):
+                        deepstack_feature_lists[i] = deepstack_feature_lists[i][
+                            token_keep_mask
+                        ]
 
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_feature = self.deepstack_merger_list[
@@ -582,7 +589,6 @@ class PrunedQwen3VLTextModel(Qwen3VLTextModel):
         super().__init__(config)
         self.pruner = None
         self.inference_context = InferenceContext(
-            attentions=[],
             surviving_visual_indices=[],
             image_grid_thw=None,
             spatial_merge_size=0,
@@ -714,6 +720,12 @@ class PrunedQwen3VLTextModel(Qwen3VLTextModel):
                     surviving_visual_indices.cpu()
                 )
 
+                if deepstack_visual_embeds is not None:
+                    for i in range(len(deepstack_visual_embeds)):
+                        deepstack_visual_embeds[i] = deepstack_visual_embeds[i][
+                            visual_keep_mask
+                        ]
+
             visual_pos_masks = visual_pos_masks[:, keep_mask]
             cos, sin = position_embeddings
             position_embeddings = (cos[:, keep_mask, :], sin[:, keep_mask, :])
@@ -739,7 +751,6 @@ class PrunedQwen3VLTextModel(Qwen3VLTextModel):
                 avg_layer_attn_weights = layer_attn_weights.mean(dim=1).squeeze(
                     0
                 )  # assume B=1 for now.
-                self.inference_context.attentions.append(avg_layer_attn_weights.cpu())
 
                 if self.pruner is not None:
                     hidden_states, keep_mask = self.pruner.prune_decoder_forward(
@@ -759,6 +770,13 @@ class PrunedQwen3VLTextModel(Qwen3VLTextModel):
                             surviving_visual_indices.cpu()
                         )
 
+                        if deepstack_visual_embeds is not None:
+                            for i in range(len(deepstack_visual_embeds)):
+                                if deepstack_visual_embeds[i] is not None:
+                                    deepstack_visual_embeds[i] = (
+                                        deepstack_visual_embeds[i][visual_keep_mask]
+                                    )
+
                     visual_pos_masks = visual_pos_masks[:, keep_mask]
                     cos, sin = position_embeddings
                     position_embeddings = (cos[:, keep_mask, :], sin[:, keep_mask, :])
@@ -772,15 +790,12 @@ class PrunedQwen3VLTextModel(Qwen3VLTextModel):
             if deepstack_visual_embeds is not None and layer_idx in range(
                 len(deepstack_visual_embeds)
             ):
-                if is_prefill and self.pruner is not None:
-                    deepstack_visual_embeds[layer_idx] = deepstack_visual_embeds[
-                        layer_idx
-                    ][surviving_visual_indices, :]
                 hidden_states = self._deepstack_process(
                     hidden_states,
                     visual_pos_masks,
                     deepstack_visual_embeds[layer_idx],
                 )
+                deepstack_visual_embeds[layer_idx] = None
 
         hidden_states = self.norm(hidden_states)
 

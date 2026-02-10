@@ -1,7 +1,39 @@
 import modal
 
+DATBENCH_SUBSETS = [
+    "chart",
+    "counting",
+    "document",
+    "general",
+    "grounding",
+    "math",
+    "scene",
+    "spatial",
+    "table",
+]
 
-def get_modal_image():
+
+def download_model_and_data(model_name, dataset_name):
+    """
+    function that is run as a build step to download model/dataset.
+    """
+    from datasets import load_dataset
+    from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+
+    print(f"Downloading model: {model_name}")
+    Qwen3VLForConditionalGeneration.from_pretrained(model_name)
+    AutoProcessor.from_pretrained(model_name)
+
+    print(f"Downloading dataset: {dataset_name}")
+    for subset in DATBENCH_SUBSETS:
+        print(f"Downloading subset: {subset}")
+        load_dataset(dataset_name, subset, split="test")
+
+
+def get_modal_image(
+    model_name="Qwen/Qwen3-VL-8B-Instruct",
+    dataset_name="DatologyAI/DatBench",
+):
     image = (
         modal.Image.debian_slim(
             python_version="3.10",
@@ -23,6 +55,11 @@ def get_modal_image():
                 "accelerate",
                 "datbench @ git+https://github.com/bkal01/DatBench.git@fix/boxed-parsing",
             ],
+        )
+        .run_function(
+            download_model_and_data,
+            kwargs={"model_name": model_name, "dataset_name": dataset_name},
+            secrets=[modal.Secret.from_name("huggingface")],
         )
         .add_local_dir(
             local_path="models",

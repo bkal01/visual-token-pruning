@@ -47,7 +47,7 @@ def save_results_to_volume(
 
 @app.function(
     image=image,
-    gpu="A100",
+    gpu="A100-80GB",
     timeout=30 * 60,
     retries=1,
     secrets=[modal.Secret.from_name("huggingface")],
@@ -135,6 +135,7 @@ def evaluate_pruner_subset(
                 visualizations_data.append(
                     {
                         "sample_id": sample_id,
+                        "subset": subset,
                         "surviving_indices": [
                             i.cpu().tolist() if hasattr(i, "cpu") else list(i)
                             for i in surviving_indices
@@ -207,7 +208,7 @@ def main(
     pruner: str = "baseline",
     subsets: str = "math",
     max_new_tokens: int = 1024,
-    model_name: str = "Qwen/Qwen3-VL-2B-Instruct",
+    model_name: str = "Qwen/Qwen3-VL-8B-Instruct",
 ):
     import random
 
@@ -310,7 +311,7 @@ if __name__ == "__main__":
     parser.add_argument("--pruner", type=str, default="baseline")
     parser.add_argument("--subsets", type=str, default="math")
     parser.add_argument("--max-new-tokens", type=int, default=1024)
-    parser.add_argument("--model-name", type=str, default="Qwen/Qwen3-VL-2B-Instruct")
+    parser.add_argument("--model-name", type=str, default="Qwen/Qwen3-VL-8B-Instruct")
 
     args = parser.parse_args()
     main(**vars(args))

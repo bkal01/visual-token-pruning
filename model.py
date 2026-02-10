@@ -19,7 +19,7 @@ def load_model(
 ):
     model = PrunedQwen3VL.from_pretrained(
         model_name,
-        dtype=torch.float16,
+        torch_dtype="auto",
         attn_implementation="eager",
     ).to(device)
     model.set_pruner(pruner)
@@ -165,9 +165,7 @@ def run_inference(
 
 
 def reset_inference_context(model):
-    model.model.language_model.inference_context.attentions.clear()
     model.model.language_model.inference_context.surviving_visual_indices.clear()
-    model.model.visual.inference_context.attentions.clear()
     model.model.visual.inference_context.surviving_visual_indices.clear()
 
 

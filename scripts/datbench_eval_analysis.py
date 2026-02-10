@@ -156,14 +156,9 @@ def generate_visualizations(results_dir: Path, output_dir: Path):
         print("Visualization data is empty")
         return
 
-    with open(results_dir / "raw_results.json") as f:
-        results = json.load(f)
-
-    sample_to_subset = {r["sample_id"]: r["subset"] for r in results}
-
     by_subset = defaultdict(list)
     for v in viz_data:
-        subset = sample_to_subset.get(v["sample_id"])
+        subset = v.get("subset")
         if subset:
             by_subset[subset].append(v)
 
