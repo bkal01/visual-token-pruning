@@ -19,6 +19,7 @@ class SampleResult:
     final_visual_tokens: int | None = None
     pruning_ratio: float | None = None
     pruning_steps: int | None = None
+    image_pixels: int | None = None
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:

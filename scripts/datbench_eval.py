@@ -51,6 +51,7 @@ def save_results_to_volume(
     timeout=30 * 60,
     retries=1,
     secrets=[modal.Secret.from_name("huggingface")],
+    volumes={RESULTS_VOLUME_PATH: results_volume},
 )
 def evaluate_pruner_subset(
     pruner_name: str,
@@ -69,8 +70,11 @@ def evaluate_pruner_subset(
     Returns:
         Dict with results and visualizations
     """
+    import os
+
+    import torch
     import transformers
-    from datasets import load_dataset
+    from datasets import load_from_disk
     from datbench import DatBenchEvaluator, VLMResponse
 
     from eval.config import get_pruner
@@ -91,7 +95,7 @@ def evaluate_pruner_subset(
     )
 
     print(f"Loading DatBench subset: {subset}")
-    dataset = load_dataset("DatologyAI/DatBench", subset, split="test")
+    dataset = load_from_disk(f"/root/datbench_filtered/{subset}")
 
     if sample_indices:
         valid_indices = [i for i in sample_indices if i < len(dataset)]
@@ -102,6 +106,9 @@ def evaluate_pruner_subset(
     evaluator = DatBenchEvaluator(dataset, subset)
     tasks = evaluator.get_inference_tasks()
 
+    image_dir = f"{RESULTS_VOLUME_PATH}/images/{subset}"
+    os.makedirs(image_dir, exist_ok=True)
+
     results = []
     visualizations_data = []
     vlm_responses = []
@@ -110,6 +117,12 @@ def evaluate_pruner_subset(
     for idx, task in enumerate(tasks):
         sample_id = valid_indices[idx] if valid_indices else idx
         print(f"  Processing sample {sample_id} (task_id={task.id})...")
+
+        image_path = f"{image_dir}/{sample_id}.png"
+        if not os.path.exists(image_path):
+            task.image.save(image_path)
+
+        image_pixels = task.image.width * task.image.height
 
         reset_inference_context(model)
 
@@ -167,6 +180,7 @@ def evaluate_pruner_subset(
                 else 0,
                 pruning_ratio=result.get_pruning_ratio(),
                 pruning_steps=max(0, len(surviving_indices) - 1),
+                image_pixels=image_pixels,
             )
 
         except Exception as e:
@@ -178,17 +192,21 @@ def evaluate_pruner_subset(
                 success=False,
                 question=task.question,
                 ground_truth=evaluator.samples_by_id[task.id].answer,
+                image_pixels=image_pixels,
                 error=str(e),
             )
 
         results.append(sample_result)
 
+        torch.cuda.empty_cache()
     print("Computing scores with DatBench evaluator...")
     report = evaluator.compute_metrics(vlm_responses)
     for r in report.results:
         results[task_id_to_idx[r.id]].score = r.score
 
     results_dicts = [r.to_dict() for r in results]
+
+    results_volume.commit()
 
     print(f"Completed {pruner_name} on {subset}: {len(results)} samples processed")
 
@@ -207,7 +225,7 @@ def main(
     seed: int = 42,
     pruner: str = "baseline",
     subsets: str = "math",
-    max_new_tokens: int = 1024,
+    max_new_tokens: int = 512,
     model_name: str = "Qwen/Qwen3-VL-8B-Instruct",
 ):
     import random
@@ -310,7 +328,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--pruner", type=str, default="baseline")
     parser.add_argument("--subsets", type=str, default="math")
-    parser.add_argument("--max-new-tokens", type=int, default=1024)
+    parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--model-name", type=str, default="Qwen/Qwen3-VL-8B-Instruct")
 
     args = parser.parse_args()

@@ -22,10 +22,11 @@ def load_model(
         torch_dtype="auto",
         attn_implementation="eager",
     ).to(device)
+    model.eval()
     model.set_pruner(pruner)
     model.set_rope_config(rope_config)
 
-    processor = AutoProcessor.from_pretrained(model_name)
+    processor = AutoProcessor.from_pretrained(model_name, max_pixels=4_000_000)
     return model, processor
 
 
@@ -103,7 +104,7 @@ def run_inference(
     processor,
     image,
     question,
-    max_new_tokens=1024,
+    max_new_tokens=512,
     timed=False,
 ):
     messages = [

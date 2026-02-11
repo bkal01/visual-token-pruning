@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import subprocess
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -23,6 +24,24 @@ def download_results(run_id: str, output_dir: Path) -> Path:
         check=True,
     )
     return run_dir
+
+
+def download_image(subset: str, sample_id: int, output_dir: Path) -> Path:
+    """Download a single image from the shared images directory in the Modal volume."""
+    local_path = output_dir / subset / f"{sample_id}.png"
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "modal",
+            "volume",
+            "get",
+            "datbench-results",
+            f"images/{subset}/{sample_id}.png",
+            str(local_path),
+        ],
+        check=True,
+    )
+    return local_path
 
 
 def report_metrics(results_dir: Path):
@@ -90,13 +109,18 @@ def save_pruning_progression(
 ):
     """Save step-by-step visualization of pruning progression."""
     os.makedirs(output_dir, exist_ok=True)
-    image_np = np.array(image)
 
     H_patches, W_patches = int(image_grid_thw[1]), int(image_grid_thw[2])
     H_tok = H_patches // spatial_merge_size
     W_tok = W_patches // spatial_merge_size
     token_size = spatial_merge_size * patch_size
     total_tokens = H_tok * W_tok
+
+    expected_h = H_tok * token_size
+    expected_w = W_tok * token_size
+    if image.size != (expected_w, expected_h):
+        image = image.resize((expected_w, expected_h), Image.LANCZOS)
+    image_np = np.array(image)
 
     # Save original
     plt.figure(figsize=(10, 10))
@@ -139,8 +163,6 @@ def save_pruning_progression(
 
 def generate_visualizations(results_dir: Path, output_dir: Path):
     """Generate visualizations for each subset."""
-    from datasets import load_dataset
-
     with open(results_dir / "config.json") as f:
         config = json.load(f)
 
@@ -162,33 +184,30 @@ def generate_visualizations(results_dir: Path, output_dir: Path):
         if subset:
             by_subset[subset].append(v)
 
-    for subset in config["subsets"]:
-        subset_viz = by_subset.get(subset, [])
-        if not subset_viz:
-            print(f"No visualization data for {subset}")
-            continue
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        for subset in config["subsets"]:
+            subset_viz = by_subset.get(subset, [])
+            if not subset_viz:
+                print(f"No visualization data for {subset}")
+                continue
 
-        v = subset_viz[0]
-        sample_id = v["sample_id"]
+            v = subset_viz[0]
+            sample_id = v["sample_id"]
 
-        print(f"\nGenerating visualization for {subset} (sample {sample_id})...")
-        dataset = load_dataset("DatologyAI/DatBench", subset, split="test")
+            print(f"\nGenerating visualization for {subset} (sample {sample_id})...")
+            image_path = download_image(subset, sample_id, Path(tmp_dir))
+            image = Image.open(image_path)
 
-        if sample_id >= len(dataset):
-            print(f"  Sample {sample_id} out of range")
-            continue
+            save_pruning_progression(
+                image=image,
+                surviving_indices=v["surviving_indices"],
+                image_grid_thw=v["image_grid_thw"],
+                spatial_merge_size=v["spatial_merge_size"],
+                patch_size=v["patch_size"],
+                output_dir=output_dir / subset,
+            )
 
-        image = dataset[sample_id]["image"]
-        save_pruning_progression(
-            image=image,
-            surviving_indices=v["surviving_indices"],
-            image_grid_thw=v["image_grid_thw"],
-            spatial_merge_size=v["spatial_merge_size"],
-            patch_size=v["patch_size"],
-            output_dir=output_dir / subset,
-        )
-
-        print(f"  Saved to {output_dir / subset}/")
+            print(f"  Saved to {output_dir / subset}/")
 
 
 def main():
@@ -211,7 +230,8 @@ def main():
 
     if args.visualize:
         generate_visualizations(
-            results_dir, args.output_dir / args.run_id / "visualizations"
+            results_dir,
+            args.output_dir / args.run_id / "visualizations",
         )
 
 

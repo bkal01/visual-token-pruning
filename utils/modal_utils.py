@@ -13,21 +13,28 @@ DATBENCH_SUBSETS = [
 ]
 
 
-def download_model_and_data(model_name, dataset_name):
-    """
-    function that is run as a build step to download model/dataset.
-    """
+def download_data(dataset_name):
+    import os
+
     from datasets import load_dataset
+
+    print(f"Downloading dataset: {dataset_name}")
+    for subset in DATBENCH_SUBSETS:
+        print(f"Downloading subset: {subset}")
+        ds = load_dataset(dataset_name, subset, split="test")
+        filtered = ds.filter(lambda x: x["eval_mode"] == "direct")
+        save_path = f"/root/datbench_filtered/{subset}"
+        os.makedirs(save_path, exist_ok=True)
+        filtered.save_to_disk(save_path)
+        print(f"  Saved {len(filtered)} filtered samples to {save_path}")
+
+
+def download_model(model_name):
     from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
     print(f"Downloading model: {model_name}")
     Qwen3VLForConditionalGeneration.from_pretrained(model_name)
     AutoProcessor.from_pretrained(model_name)
-
-    print(f"Downloading dataset: {dataset_name}")
-    for subset in DATBENCH_SUBSETS:
-        print(f"Downloading subset: {subset}")
-        load_dataset(dataset_name, subset, split="test")
 
 
 def get_modal_image(
@@ -40,6 +47,11 @@ def get_modal_image(
         )
         .apt_install(
             "git",
+        )
+        .env(
+            {
+                "PYTORCH_ALLOC_CONF": "expandable_segments:True",
+            }
         )
         .uv_pip_install(
             [
@@ -57,9 +69,16 @@ def get_modal_image(
             ],
         )
         .run_function(
-            download_model_and_data,
-            kwargs={"model_name": model_name, "dataset_name": dataset_name},
+            download_data,
+            kwargs={"dataset_name": dataset_name},
             secrets=[modal.Secret.from_name("huggingface")],
+            timeout=45 * 60,
+        )
+        .run_function(
+            download_model,
+            kwargs={"model_name": model_name},
+            secrets=[modal.Secret.from_name("huggingface")],
+            timeout=45 * 60,
         )
         .add_local_dir(
             local_path="models",
